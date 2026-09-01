@@ -201,6 +201,63 @@ sources:
           - data
         note: One cache slot for every macro series; the function name is the cache target.
 
+  - id: fred
+    display_name: FRED (Federal Reserve Bank of St. Louis)
+    priority: primary
+    geography: [US]
+    source_type: http_json
+    components: [S_M]
+    entitlement: key_required
+    staleness_bound: release_cadence
+    credential_env: FRED_API_KEY
+    # Official primary publisher rather than an aggregator, which is what upgrades S_M's
+    # source-quality label. All series below verified entitled on a free key 2026-08-31.
+    # A keyless path serving the same series exists (fredgraph.csv) and is documented in
+    # docs/alternatives/pa9-macro-keyless-alternative.md; only the keyed API carries the
+    # release calendar.
+    endpoints:
+      - id: series_observations
+        component: S_M
+        method: GET
+        url_template: https://api.stlouisfed.org/fred/series/observations?series_id=CPIAUCSL&sort_order=asc&api_key={api_key}&file_type=json
+        cache_provider: fred
+        cache_endpoint: series_observations
+        cache_target_template: CPIAUCSL
+        probe_enabled: true
+        required_json_paths:
+          - observations
+        note: >-
+          One macro series, oldest-first. FRED writes a missing observation as the literal
+          string "." - a real row on days a daily series does not publish, such as a market
+          holiday on DGS10 - so those are skipped rather than read as zero.
+      - id: release_dates
+        component: S_M
+        method: GET
+        url_template: https://api.stlouisfed.org/fred/release/dates?release_id=10&sort_order=asc&api_key={api_key}&file_type=json
+        cache_provider: fred
+        cache_endpoint: release_dates
+        cache_target_template: "10"
+        probe_enabled: false
+        required_json_paths:
+          - release_dates
+        note: >-
+          Scheduled publication dates for one release - the macro calendar FMP leaves
+          paywalled. Probe disabled because it needs a release_id resolved from
+          series_release first; it answered HTTP 200 with 9,558 dates on 2026-08-31.
+      - id: series_release
+        component: S_M
+        method: GET
+        url_template: https://api.stlouisfed.org/fred/series/release?series_id=CPIAUCSL&api_key={api_key}&file_type=json
+        cache_provider: fred
+        cache_endpoint: series_release
+        cache_target_template: CPIAUCSL
+        probe_enabled: false
+        required_json_paths:
+          - releases
+        note: >-
+          Maps a series to the release that publishes it, so calendar entries can be joined
+          to the factor they move. Verified 2026-08-31: CPIAUCSL -> release_id 10.
+
   - id: fmp
     display_name: Financial Modeling Prep
     priority: primary_or_fallback

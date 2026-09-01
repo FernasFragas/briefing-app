@@ -59,6 +59,14 @@ gate:
   crowded_confidence_multiplier: 0.5
   rejection_cooldown_days: 30
 
+# --- T1: report grading ---------------------------------------------------------
+report:
+  grading:
+    probability_weight: 0.60
+    alignment_weight: 0.40
+    divergence_penalty: 10.0
+    crowding_penalty_scale: 20.0
+
 # --- T6: component inputs ---------------------------------------------------------
 # Macro has no direction on its own: a factor's sign for a ticker comes from the
 # sector's declared sensitivity, written down BEFORE the data pull. A factor with no
@@ -108,11 +116,28 @@ horizons:
   distribution_dte: 7
 
 providers:
-  quotes: alpha_vantage
-  options: cboe
-  news: alpha_vantage
-  earnings: alpha_vantage
-  macro: fmp
+  # Ordered fallback chains. Each list is complete: the pipeline does not append
+  # hidden provider tails. A single string is still accepted for local configs.
+  options: [cboe, alpha_vantage]
+  quotes: [alpha_vantage]
+  prices: [fmp, alpha_vantage]
+  news: [alpha_vantage, fmp]
+  earnings: [alpha_vantage, fmp]
+  # FRED leads: official primary data rather than an aggregator, which upgrades S_M's
+  # source-quality label. All 8 adopted series verified entitled on a free key 2026-08-31.
+  # FMP stays as fallback; the Alpha Vantage macro slot is a dead key and is not listed.
+  macro: [fred, fmp]
+  analyst: [fmp]
+  # SEC EDGAR leads insider: Form 4 is the primary record, free and unmetered, while both
+  # aggregators behind it are a spent key and a plan-gated endpoint.
+  insider: [sec_edgar, alpha_vantage, fmp]
+  institutional: [alpha_vantage, fmp]
+  put_call: [alpha_vantage]
+  political: []
+  retail: []
+  # FINRA's consolidated file is free and needs no key. It carries daily short *volume*
+  # only, scored as a labelled flow proxy - see docs/alternatives/pa1-borrow.md.
+  short_interest: [finra]
 
 preflight:
   enabled: true
