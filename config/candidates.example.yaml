@@ -1,0 +1,332 @@
+# Idea-screening universe - 15-30 raw candidates from sector maps, screens, and themes.
+#
+# ILLUSTRATIVE ONLY. Every catalyst date must be re-sourced from issuer IR or an
+# exchange/regulator calendar. The entries below deliberately cover each gate outcome
+# so the rejected-at-gate table is exercised end to end.
+
+source: screen
+defaults:
+  broker: IBKR
+  permitted_instruments: [shares, options]
+
+candidates:
+  # --- expected to pass the gate ---
+  - ticker: AVGO
+    sector: Semiconductors
+    direction: long
+    expression_class: E
+    horizon_days: 14
+    thesis: Results event directional into a confirmed print.
+    thesis_sources:
+      - label: Company IR earnings date
+        kind: company_ir
+    catalysts:
+      - name: Quarterly results
+        date: 2026-09-04
+        status: confirmed
+        kind: earnings
+        source: Company IR
+
+  - ticker: ORCL
+    sector: Software
+    direction: long
+    expression_class: E
+    horizon_days: 14
+    thesis: Results event directional; straddle versus measured sigma.
+    thesis_sources:
+      - label: Company IR earnings date
+        kind: company_ir
+    catalysts:
+      - name: Quarterly results
+        date: 2026-09-08
+        status: confirmed
+        kind: earnings
+        source: Company IR
+
+  - ticker: LMT
+    sector: Defense
+    direction: long
+    expression_class: V
+    horizon_days: 14
+    thesis: Premium selling candidate - IV rank elevated with no unmodelled event.
+    thesis_sources:
+      - label: CBOE delayed options chain
+        kind: exchange
+    catalysts:
+      - name: US CPI (August)
+        date: 2026-09-10
+        status: confirmed
+        kind: macro
+        source: BLS release calendar
+
+  - ticker: XOM
+    sector: Energy
+    direction: neutral
+    expression_class: V
+    horizon_days: 14
+    thesis: Crude-linked vol structure into the inventory and macro prints.
+    thesis_sources:
+      - label: CBOE delayed options chain
+        kind: exchange
+    catalysts:
+      - name: OPEC+ meeting
+        date: 2026-09-07
+        status: confirmed
+        kind: macro
+        source: OPEC calendar
+
+  - ticker: MU
+    sector: Semiconductors
+    direction: long
+    expression_class: E
+    horizon_days: 21
+    thesis: Memory pricing cycle into a confirmed results date.
+    thesis_sources:
+      - label: Company IR earnings date
+        kind: company_ir
+    catalysts:
+      - name: Quarterly results
+        date: 2026-09-17
+        status: confirmed
+        kind: earnings
+        source: Company IR
+
+  - ticker: COST
+    sector: Retail
+    direction: long
+    expression_class: E
+    horizon_days: 21
+    thesis: Results event directional with monthly sales cadence support.
+    thesis_sources:
+      - label: Company IR earnings date
+        kind: company_ir
+    catalysts:
+      - name: Quarterly results
+        date: 2026-09-15
+        status: confirmed
+        kind: earnings
+        source: Company IR
+
+  - ticker: JPM
+    sector: Financials
+    direction: neutral
+    expression_class: V
+    horizon_days: 21
+    thesis: Rate-decision vol structure; skew versus own history.
+    thesis_sources:
+      - label: CBOE delayed options chain
+        kind: exchange
+    catalysts:
+      - name: FOMC decision
+        date: 2026-09-16
+        status: confirmed
+        kind: macro
+        source: Federal Reserve calendar
+
+  # --- crowded consensus trade: accepted, confidence haircut applied ---
+  - ticker: PLTR
+    sector: Software
+    direction: long
+    expression_class: E
+    horizon_days: 14
+    crowding: consensus
+    thesis: Contract award directional; the date is widely telegraphed.
+    thesis_sources:
+      - label: Agency award notice
+        kind: regulator
+    catalysts:
+      - name: Government contract decision
+        date: 2026-09-05
+        status: confirmed
+        kind: regulatory
+        telegraphed: true
+        source: Agency procurement calendar
+
+  # --- aggregator-only thesis: accepted but flagged unverified ---
+  - ticker: SMCI
+    sector: Hardware
+    direction: long
+    expression_class: E
+    horizon_days: 14
+    thesis: Screen hit on revisions; no primary source behind the thesis yet.
+    thesis_sources:
+      - label: Consensus revision screen
+        kind: aggregator
+    catalysts:
+      - name: Quarterly results
+        date: 2026-09-03
+        status: confirmed
+        kind: earnings
+        source: Company IR
+
+  # --- no dated catalyst inside the horizon -> watchlist ---
+  - ticker: KO
+    sector: Staples
+    direction: long
+    expression_class: E
+    horizon_days: 10
+    thesis: Defensive rotation candidate with no dated event in the window.
+    thesis_sources:
+      - label: Company IR earnings date
+        kind: company_ir
+    catalysts:
+      - name: Quarterly results
+        date: 2026-10-21
+        status: estimated
+        kind: earnings
+        source: Historical cadence
+
+  - ticker: PG
+    sector: Staples
+    direction: long
+    expression_class: V
+    horizon_days: 10
+    thesis: Low-IV premium buying candidate; no catalyst sourced yet.
+    thesis_sources:
+      - label: CBOE delayed options chain
+        kind: exchange
+    catalysts: []
+
+  # --- non-US names: no per-strike chain track -> S_O unavailable -> watchlist ---
+  - ticker: RHM.DE
+    name: Rheinmetall AG
+    venue: XETRA
+    geography: EU
+    country: Germany
+    currency: EUR
+    sector: Defense
+    direction: long
+    expression_class: E
+    horizon_days: 14
+    broker: Trade Republic
+    permitted_instruments: [shares, knock_out, factor_certificate]
+    thesis: Budget-cycle event directional; per-strike Eurex OI not fetchable.
+    thesis_sources:
+      - label: Company IR calendar
+        kind: company_ir
+    catalysts:
+      - name: Defence budget vote
+        date: 2026-09-06
+        status: confirmed
+        kind: regulatory
+        source: Parliament calendar
+
+  - ticker: ASML.AS
+    name: ASML Holding NV
+    venue: EURONEXT
+    geography: EU
+    country: Netherlands
+    currency: EUR
+    sector: Semiconductors
+    direction: long
+    expression_class: V
+    horizon_days: 14
+    broker: IBKR
+    permitted_instruments: [shares, options]
+    thesis: Vol structure candidate; Eurex chain requires a manual capture.
+    thesis_sources:
+      - label: Company IR calendar
+        kind: company_ir
+    catalysts:
+      - name: Investor day
+        date: 2026-09-11
+        status: confirmed
+        kind: product
+        source: Company IR
+
+  # --- class not enabled on the current data plan (S_I / S_F plan-gated) ---
+  - ticker: WBA
+    sector: Retail
+    direction: short
+    expression_class: S
+    horizon_days: 30
+    thesis: Borrow-dependent short on deteriorating ownership flow.
+    borrow_source: IBKR shortable list
+    permitted_instruments: [shares, options]
+    thesis_sources:
+      - label: SEC filing
+        kind: regulator
+    catalysts:
+      - name: Quarterly results
+        date: 2026-09-14
+        status: confirmed
+        kind: earnings
+        source: Company IR
+
+  # --- short with no declared borrow source ---
+  - ticker: CVNA
+    sector: Autos
+    direction: short
+    expression_class: S
+    horizon_days: 30
+    thesis: Short candidate with no borrow or short-interest source declared.
+    permitted_instruments: [shares, options]
+    thesis_sources:
+      - label: SEC filing
+        kind: regulator
+    catalysts:
+      - name: Quarterly results
+        date: 2026-09-09
+        status: confirmed
+        kind: earnings
+        source: Company IR
+
+  # --- positional fundamental: needs S_I/S_F, not enabled this run ---
+  - ticker: BRK.B
+    sector: Financials
+    direction: long
+    expression_class: P
+    horizon_days: 60
+    thesis: Positional fundamental long on ownership and insider flow.
+    thesis_sources:
+      - label: SEC 13F filing
+        kind: regulator
+    catalysts:
+      - name: Quarterly results
+        date: 2026-09-30
+        status: estimated
+        kind: earnings
+        source: Historical cadence
+
+  # --- leveraged-only permitted set with an Estimated catalyst ---
+  - ticker: SIE.DE
+    name: Siemens AG
+    venue: XETRA
+    geography: EU
+    country: Germany
+    currency: EUR
+    sector: Industrials
+    direction: long
+    expression_class: E
+    horizon_days: 14
+    broker: Trade Republic
+    permitted_instruments: [knock_out, factor_certificate]
+    thesis: Leveraged-only expression on an unconfirmed date.
+    thesis_sources:
+      - label: Company IR calendar
+        kind: company_ir
+    catalysts:
+      - name: Capital markets day
+        date: 2026-09-08
+        status: estimated
+        kind: capital_markets_day
+        source: Historical cadence
+
+  # --- platform permits no instrument that can express class V ---
+  - ticker: NKE
+    sector: Retail
+    direction: neutral
+    expression_class: V
+    horizon_days: 21
+    broker: Cash equities account
+    permitted_instruments: [shares]
+    thesis: Vol structure idea on a shares-only account.
+    thesis_sources:
+      - label: CBOE delayed options chain
+        kind: exchange
+    catalysts:
+      - name: Quarterly results
+        date: 2026-09-18
+        status: confirmed
+        kind: earnings
+        source: Company IR

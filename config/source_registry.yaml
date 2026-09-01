@@ -1,0 +1,599 @@
+version: 2
+
+# `required: false` marks an endpoint the current plan is not expected to cover. It is
+# still probed and still reports its true status; it just does not fail preflight, so a
+# known entitlement ceiling cannot mask a real regression on an entitled source.
+
+sources:
+  - id: cboe_delayed_options
+    display_name: CBOE public delayed options chain
+    priority: primary
+    geography: [US]
+    source_type: http_json
+    components: [S_O]
+    entitlement: free_delayed
+    staleness_bound: same_session
+    endpoints:
+      - id: delayed_options_chain
+        component: S_O
+        method: GET
+        url_template: https://cdn.cboe.com/api/global/delayed_quotes/options/{ticker}.json
+        cache_provider: cboe
+        cache_endpoint: delayed_options_chain
+        probe_enabled: true
+        required_json_paths:
+          - data.options
+        note: Primary US options source. Delayed feed; print timestamp.
+
+  - id: alpha_vantage
+    display_name: Alpha Vantage
+    priority: primary_or_fallback
+    geography: [US, EU]
+    source_type: http_json
+    components: [S_O, S_M, S_S, S_I, S_F]
+    entitlement: key_required_plan_gated
+    staleness_bound: endpoint_specific
+    credential_env: ALPHA_VANTAGE_API_KEY
+    # A free key allows 25 requests per day in total and asks for at most one per
+    # second, and answers HTTP 200 with a rate-limit notice once either is crossed - a
+    # body indistinguishable from a data failure by the time it reaches a component.
+    # Only `symbol_search` is probed on every run; the rest are `probe_tier: deep`, so a
+    # routine preflight spends one request rather than thirteen of the day's twenty-five.
+    probe_delay_seconds: 1.2
+    endpoints:
+      - id: symbol_search
+        component: reference
+        method: GET
+        url_template: https://www.alphavantage.co/query?function=SYMBOL_SEARCH&keywords={ticker}&apikey={api_key}
+        cache_provider: alpha_vantage
+        cache_endpoint: symbol_search
+        probe_enabled: true
+        required_json_paths:
+          - bestMatches
+        note: Cheap entitlement probe and ticker venue lookup.
+      - id: realtime_options
+        component: S_O
+        method: GET
+        url_template: https://www.alphavantage.co/query?function=REALTIME_OPTIONS&symbol={ticker}&apikey={api_key}
+        cache_provider: alpha_vantage
+        cache_endpoint: realtime_options
+        probe_enabled: true
+        probe_tier: deep
+        required: false
+        required_json_paths:
+          - data
+        note: >-
+          Premium options entitlement, not held on the current plan: the endpoint answers
+          HTTP 200 with an artificial sample schema, which validation reports as synthetic.
+          CBOE is the US options source.
+      - id: global_quote
+        component: quote
+        method: GET
+        url_template: https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={api_key}
+        cache_provider: alpha_vantage
+        cache_endpoint: global_quote
+        probe_enabled: true
+        probe_tier: deep
+        required_json_paths:
+          - Global Quote
+        note: Quote source for spot and daily snapshot spot.
+      - id: daily
+        component: price_history
+        method: GET
+        url_template: https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={ticker}&outputsize=compact&apikey={api_key}
+        cache_provider: alpha_vantage
+        cache_endpoint: daily
+        probe_enabled: true
+        probe_tier: deep
+        required_json_paths:
+          - Time Series (Daily)
+        note: >-
+          Unadjusted daily bars. Free on every plan and the price-history fallback when
+          the adjusted series is not entitled; adequate for short-horizon realized vol.
+      - id: daily_adjusted
+        component: price_history
+        method: GET
+        url_template: https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol={ticker}&outputsize=compact&apikey={api_key}
+        cache_provider: alpha_vantage
+        cache_endpoint: daily_adjusted
+        probe_enabled: true
+        probe_tier: deep
+        required: false
+        required_json_paths:
+          - Time Series (Daily)
+        note: >-
+          Split/dividend-adjusted bars. Separately gated premium endpoint; preferred when
+          entitled because unadjusted closes distort sigma across a split.
+      - id: news_sentiment
+        component: S_S
+        method: GET
+        url_template: https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&apikey={api_key}
+        cache_provider: alpha_vantage
+        cache_endpoint: news_sentiment
+        probe_enabled: true
+        probe_tier: deep
+        required_json_paths:
+          - feed
+        note: Quota-sensitive; daily pipeline fetches after candidate gate.
+      - id: earnings_calendar
+        component: catalyst
+        method: GET
+        url_template: https://www.alphavantage.co/query?function=EARNINGS_CALENDAR&symbol={ticker}&horizon=3month&apikey={api_key}
+        cache_provider: alpha_vantage
+        cache_endpoint: earnings_calendar
+        probe_enabled: true
+        probe_tier: deep
+        response_format: text
+        probe_symbol: AAPL
+        note: CSV endpoint; absence from provider output is not proof of no event.
+      - id: insider_transactions
+        component: S_I
+        method: GET
+        url_template: https://www.alphavantage.co/query?function=INSIDER_TRANSACTIONS&symbol={ticker}&apikey={api_key}
+        cache_provider: alpha_vantage
+        cache_endpoint: insider_transactions
+        probe_enabled: true
+        probe_tier: deep
+        probe_symbol: AAPL
+        required_json_paths:
+          - data
+        note: >-
+          Probed against an operating company: an index ETF has no Form 4 filers, so an
+          empty response there would say nothing about the entitlement.
+      - id: institutional_holdings
+        component: S_F
+        method: GET
+        url_template: https://www.alphavantage.co/query?function=INSTITUTIONAL_HOLDINGS&symbol={ticker}&apikey={api_key}
+        cache_provider: alpha_vantage
+        cache_endpoint: institutional_holdings
+        probe_enabled: true
+        probe_tier: deep
+        probe_symbol: AAPL
+        required_json_paths:
+          - holdings
+        note: Holder-level rows live under `holdings`, with the aggregates at the root.
+      - id: realtime_put_call_ratio
+        component: S_O
+        method: GET
+        url_template: https://www.alphavantage.co/query?function=REALTIME_PUT_CALL_RATIO&symbol={ticker}&apikey={api_key}
+        cache_provider: alpha_vantage
+        cache_endpoint: realtime_put_call_ratio
+        probe_enabled: true
+        probe_tier: deep
+        required_json_paths:
+          - put_call_ratio_full_chain
+        note: Level is meaningless alone; scored as a percentile of the ticker's own history.
+      - id: historical_put_call_ratio
+        component: S_O
+        method: GET
+        url_template: https://www.alphavantage.co/query?function=HISTORICAL_PUT_CALL_RATIO&symbol={ticker}&apikey={api_key}
+        cache_provider: alpha_vantage
+        cache_endpoint: historical_put_call_ratio
+        probe_enabled: true
+        probe_tier: deep
+        required_json_paths:
+          - put_call_ratio_full_chain
+        note: Supplies the baseline the put/call percentile is measured against.
+      - id: historical_options
+        component: S_O
+        method: GET
+        url_template: https://www.alphavantage.co/query?function=HISTORICAL_OPTIONS&symbol={ticker}&apikey={api_key}
+        cache_provider: alpha_vantage
+        cache_endpoint: historical_options
+        probe_enabled: true
+        probe_tier: deep
+        required: false
+        required_json_paths:
+          - data
+        note: >-
+          Premium options entitlement, not held on the current plan. Backfill for IV rank
+          history; same sample-data traps as realtime options.
+      - id: macro
+        component: S_M
+        method: GET
+        url_template: https://www.alphavantage.co/query?function=CPI&apikey={api_key}
+        cache_provider: alpha_vantage
+        cache_endpoint: macro
+        probe_enabled: true
+        probe_tier: deep
+        cache_target_template: cpi
+        required_json_paths:
+          - data
+        note: One cache slot for every macro series; the function name is the cache target.
+
+  - id: fmp
+    display_name: Financial Modeling Prep
+    priority: primary_or_fallback
+    geography: [US, EU]
+    source_type: http_json
+    components: [S_M, S_S, S_I, S_F]
+    entitlement: key_required_plan_gated
+    staleness_bound: endpoint_specific
+    credential_env: FMP_API_KEY
+    # The v3/v4 API was retired for new subscriptions on 2025-08-31 and answers HTTP 403
+    # `Legacy Endpoint` regardless of key. Every path below is on the `stable` API.
+    endpoints:
+      - id: quote
+        component: reference
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/quote?symbol={ticker}&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: quote
+        probe_enabled: true
+        probe_symbol: AAPL
+        required_json_paths:
+          - root
+        note: >-
+          Entitlement probe, run against a covered reference name. The free plan gates by
+          symbol as well as by endpoint - AVGO, ORCL, MU and QQQ answer HTTP 402 here
+          while AAPL, MSFT and SPY answer 200 - so `ok` proves the entitlement, never
+          that every name in the universe is covered.
+      - id: historical_price_eod
+        component: price_history
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={ticker}&from={from_date}&to={to_date}&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: historical_price_eod
+        probe_enabled: true
+        probe_symbol: AAPL
+        probe_window_days: 400
+        required_json_paths:
+          - root
+        note: >-
+          Primary daily OHLCV source. Free and unmetered, unlike Alpha Vantage, whose
+          adjusted series is premium and whose free series costs one of 25 daily requests.
+      - id: economics
+        component: S_M
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/economic-calendar?from={from_date}&to={to_date}&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: economics
+        probe_enabled: true
+        required: false
+        probe_window_days: 30
+        cache_target_template: macro
+        required_json_paths:
+          - root
+        note: >-
+          Dated macro calendar. Restricted on the current plan, so the macro leg falls back
+          to `economic_indicators`, `treasury_rates`, and Alpha Vantage macro series.
+      - id: economic_indicators
+        component: S_M
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/economic-indicators?name=GDP&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: economic_indicators
+        probe_enabled: true
+        cache_target_template: gdp
+        required_json_paths:
+          - root
+        note: One cache slot per named series; the indicator name is the cache target.
+      - id: treasury_rates
+        component: S_M
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/treasury-rates?apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: treasury_rates
+        probe_enabled: true
+        cache_target_template: curve
+        required_json_paths:
+          - root
+        note: Full Treasury curve; the rates leg of the macro overview.
+      - id: stock_news
+        component: S_S
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/news/stock?symbols={ticker}&limit=50&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: stock_news
+        probe_enabled: true
+        required: false
+        probe_symbol: AAPL
+        required_json_paths:
+          - root
+        note: >-
+          News fallback when Alpha Vantage is unavailable. Restricted on the current plan;
+          Alpha Vantage NEWS_SENTIMENT carries the sentiment leg.
+      - id: insider_trades
+        component: S_I
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/insider-trading/search?symbol={ticker}&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: insider_trades
+        probe_enabled: true
+        required: false
+        probe_symbol: AAPL
+        required_json_paths:
+          - root
+        note: >-
+          Per-symbol insider search is restricted on the current plan. Alpha Vantage
+          INSIDER_TRANSACTIONS and SEC Form 4 carry S_I; never read the refusal as zero.
+      - id: sec_filings
+        component: filings
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/sec-filings-search/symbol?symbol={ticker}&from={from_date}&to={to_date}&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: sec_filings
+        probe_enabled: true
+        probe_symbol: AAPL
+        probe_window_days: 90
+        required_json_paths:
+          - root
+        note: Filing metadata fallback; prefer SEC EDGAR when possible.
+      - id: institutional_ownership
+        component: S_F
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/institutional-ownership/symbol-positions-summary?symbol={ticker}&year={year}&quarter={quarter}&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: institutional_ownership
+        probe_enabled: true
+        required: false
+        probe_symbol: AAPL
+        required_json_paths:
+          - root
+        note: >-
+          Restricted on the current plan; Alpha Vantage INSTITUTIONAL_HOLDINGS carries S_F.
+          Mark S_F unavailable rather than zero when both refuse.
+      - id: analyst_ratings
+        component: S_S
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/grades-consensus?symbol={ticker}&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: analyst_ratings
+        probe_enabled: true
+        probe_symbol: AAPL
+        required_json_paths:
+          - root
+        note: >-
+          Analyst buy/hold/sell counts, not a vendor scoring model. Aggregator-sourced, so
+          the sentiment leg must be labelled as such. Probed on an operating company:
+          consensus endpoints return [] for an index ETF.
+      - id: price_target_consensus
+        component: S_S
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/price-target-consensus?symbol={ticker}&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: price_target_consensus
+        probe_enabled: true
+        probe_symbol: AAPL
+        required_json_paths:
+          - root
+        note: >-
+          Standing consensus target, paired with the grade consensus so S_S has both a
+          direction and a magnitude. Aggregator-sourced.
+      - id: analyst_estimates
+        component: S_S
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/analyst-estimates?symbol={ticker}&period=annual&limit=10&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: analyst_estimates
+        probe_enabled: true
+        probe_symbol: AAPL
+        required_json_paths:
+          - root
+        note: Consensus estimates; aggregator-sourced.
+      - id: price_targets
+        component: S_S
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/price-target-summary?symbol={ticker}&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: price_targets
+        probe_enabled: true
+        probe_symbol: AAPL
+        required_json_paths:
+          - root
+        note: Aggregator-sourced; never a standalone thesis.
+      - id: income_statement
+        component: fundamentals
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/income-statement?symbol={ticker}&limit=5&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: income_statement
+        probe_enabled: true
+        probe_symbol: AAPL
+        required_json_paths:
+          - root
+        note: Fundamentals for class P theses; prefer company IR for headline figures.
+      - id: balance_sheet_statement
+        component: fundamentals
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/balance-sheet-statement?symbol={ticker}&limit=5&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: balance_sheet_statement
+        probe_enabled: true
+        probe_symbol: AAPL
+        required_json_paths:
+          - root
+        note: Fundamentals for class P theses.
+      - id: cash_flow_statement
+        component: fundamentals
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/cash-flow-statement?symbol={ticker}&limit=5&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: cash_flow_statement
+        probe_enabled: true
+        probe_symbol: AAPL
+        required_json_paths:
+          - root
+        note: Fundamentals for class P theses.
+      - id: earnings_calendar
+        component: catalyst
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/earnings-calendar?from={from_date}&to={to_date}&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: earnings_calendar
+        probe_enabled: true
+        required: false
+        probe_window_days: 30
+        cache_target_template: calendar
+        required_json_paths:
+          - root
+        note: >-
+          Dated earnings calendar, the catalyst fallback behind Alpha Vantage. Absence from
+          provider output is never proof of no event.
+      - id: form_13f
+        component: S_F
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/institutional-ownership/extract?cik={cik}&year={year}&quarter={quarter}&apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: form_13f
+        probe_enabled: true
+        required: false
+        probe_symbol: AAPL
+        cache_target_template: "{cik}"
+        required_json_paths:
+          - root
+        note: Quarterly 13F holdings extract; plan-gated on most tiers.
+
+  - id: finra
+    display_name: FINRA short sale volume
+    priority: primary
+    geography: [US]
+    source_type: http_text
+    components: [S_O]
+    entitlement: free
+    staleness_bound: daily
+    endpoints:
+      - id: short_sale_volume
+        component: S_O
+        method: GET
+        url_template: https://cdn.finra.org/equity/regsho/daily/CNMSshvol{trade_date}.txt
+        cache_provider: finra
+        cache_endpoint: short_sale_volume
+        cache_target_template: CNMS_{trade_date}
+        probe_enabled: true
+        response_format: text
+        # The consolidated file lands on a T+1 schedule, so the most recent weekday is
+        # routinely a 404 rather than an outage; walk back to the last published session.
+        probe_date_lookback_days: 5
+        note: Daily short-volume flow proxy only; not short interest.
+
+  - id: sec_edgar
+    display_name: SEC EDGAR filings
+    priority: primary
+    geography: [US]
+    source_type: http_json
+    components: [S_I, S_F]
+    entitlement: free_user_agent_required
+    staleness_bound: filing_release
+    endpoints:
+      - id: company_tickers
+        component: reference
+        method: GET
+        url_template: https://www.sec.gov/files/company_tickers.json
+        cache_provider: sec_edgar
+        cache_endpoint: company_tickers
+        cache_target_template: all
+        probe_enabled: true
+        required_json_paths:
+          - root
+        note: Ticker to CIK mapping; every other EDGAR probe resolves through it.
+      - id: company_submissions
+        component: S_I
+        method: GET
+        url_template: https://data.sec.gov/submissions/CIK{cik_padded}.json
+        cache_provider: sec_edgar
+        cache_endpoint: company_submissions
+        cache_target_template: "{cik_padded}"
+        probe_enabled: true
+        probe_symbol: AAPL
+        required_json_paths:
+          - filings.recent.form
+        note: CIK resolves from company_tickers, so the probe covers the whole lookup path.
+      - id: filing_document
+        component: filings
+        method: GET
+        url_template: https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/{document}
+        cache_provider: sec_edgar
+        cache_endpoint: filing_document
+        cache_target_template: "{cik}_{accession}"
+        probe_enabled: true
+        response_format: text
+        probe_symbol: AAPL
+        probe_filing_forms: ["4"]
+        note: >-
+          Fetches the newest Form 4 body located via company_submissions, which is the
+          only way to prove the Archives path works rather than assume it.
+      - id: form_13f
+        component: S_F
+        cache_provider: sec_edgar
+        cache_endpoint: form_13f
+        probe_enabled: false
+        required: false
+        note: >-
+          Derived, not a URL of its own: 13F bodies are assembled from a filer's
+          company_submissions plus filing_document, both of which are probed above.
+
+  - id: manual_eurex_capture
+    display_name: Eurex manual or browser chain capture
+    priority: primary_when_captured
+    geography: [EU]
+    source_type: manual_csv
+    components: [S_O]
+    entitlement: manual_or_paid_feed
+    staleness_bound: same_session
+    endpoints:
+      - id: options_chain_capture
+        component: S_O
+        cache_provider: eurex
+        cache_endpoint: manual_options_capture
+        probe_enabled: false
+        manual_schema: schemas/eurex_options_manual_capture.csv
+        note: Per-strike OI requires browser/manual/paid feed. Product-level stats are checksum only.
+
+  - id: bundesanzeiger_fca
+    display_name: EU disclosed net short positions
+    priority: primary
+    geography: [EU]
+    source_type: browser_or_file
+    components: [S_O]
+    entitlement: free_public
+    staleness_bound: daily_or_register_update
+    endpoints:
+      - id: bundesanzeiger_net_shorts
+        component: S_O
+        cache_provider: bundesanzeiger
+        cache_endpoint: net_short_positions
+        probe_enabled: false
+        note: >-
+          German disclosed net shorts above threshold; holder-level, not float-wide SI.
+          The register answers a bare fetch with a session redirect, so the capture is a
+          browser or manual download.
+      - id: fca_short_positions
+        component: S_O
+        method: GET
+        source_type: http_binary
+        url_template: https://www.fca.org.uk/publication/data/short-positions-daily-update.xlsx
+        cache_provider: fca
+        cache_endpoint: short_positions_daily_update
+        cache_target_template: daily_update
+        probe_enabled: true
+        response_format: binary
+        note: >-
+          UK aggregate net short positions. A plain XLSX download with no session or key,
+          so it is fetched and validated as a spreadsheet rather than captured by hand.
+
+  - id: eu_filings
+    display_name: EU insider and ownership substitutes
+    priority: primary
+    geography: [EU]
+    source_type: manual_or_ir
+    components: [S_I, S_F]
+    entitlement: issuer_or_national_register
+    staleness_bound: filing_release
+    endpoints:
+      - id: mar_article_19
+        component: S_I
+        cache_provider: eu_oam
+        cache_endpoint: mar_article_19
+        probe_enabled: false
+        note: >-
+          PDMR/directors dealings substitute for Form 4. No pan-EU API exists; each
+          national OAM publishes separately, so this stays an issuer or register capture.
+      - id: major_holdings
+        component: S_F
+        cache_provider: eu_oam
+        cache_endpoint: major_holdings
+        probe_enabled: false
+        note: >-
+          Major-holdings notifications substitute for 13F; event-driven and per-register,
+          so there is nothing to probe until a capture is dropped in.

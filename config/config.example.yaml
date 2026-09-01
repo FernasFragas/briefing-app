@@ -1,0 +1,189 @@
+timezone: Europe/Lisbon
+
+# --- T2: universe construction -------------------------------------------------
+# `fixed`   - the 8-12 watched names, inline or via `fixed_files`.
+# `screen`  - 15-30 raw candidates from sector maps, screens, and manual watchlists.
+# Relative paths resolve next to this file first, then against the working directory.
+universe:
+  mode: both
+  fixed: []
+  fixed_files:
+    - universe.example.yaml
+  candidate_files:
+    - candidates.example.yaml
+    - watchlist.example.csv
+  fixed_min: 8
+  # Raised 12 -> 15 on 2026-08-31 for INTC, CRWV, AMAT, RHM.DE, LDO.MI.
+  fixed_max: 15
+  screen_min: 15
+  screen_max: 30
+
+# Applied to any candidate field a loaded record leaves unset.
+candidate_defaults:
+  venue: NASDAQ
+  # Uncomment to allow bare-ticker shorthand in `universe.fixed`; otherwise every
+  # candidate must declare its own one-line thesis.
+  # thesis: Watched name - structure-driven, no single-name thesis declared.
+
+  geography: US
+  currency: USD
+  direction: long
+  horizon_days: 10
+  expression_class: E
+  broker: IBKR
+  permitted_instruments:
+    - shares
+    - options
+  crowding: neutral
+
+# --- T2: pre-scoring catalyst gate ---------------------------------------------
+gate:
+  default_horizon_days: 10
+  # Classes P and S need S_I/S_F, which are plan-gated on the current entitlements.
+  # Enable them once T1 preflight reports insider/ownership data as available.
+  enabled_expression_classes: [V, E]
+  class_instrument_fit:
+    V: [options]
+    E: [options, shares, etf, futures, factor_certificate, knock_out, warrant, cfd]
+    P: [shares, etf, options]
+    S: [options, shares, cfd, knock_out, factor_certificate]
+  leveraged_instruments: [factor_certificate, knock_out, warrant, cfd, futures]
+  # An Estimated catalyst date never authorises a leveraged expression.
+  allow_leverage_on_estimated_catalyst: false
+  # Per-strike EU chain track: A browser capture, B manual capture (Tier B cap),
+  # C nothing available -> S_O = n/a, so V/E on non-US names are demoted.
+  eu_options_track: C
+  require_borrow_source_for_shorts: true
+  require_thesis_source: true
+  unverified_thesis_action: flag
+  crowded_confidence_multiplier: 0.5
+  rejection_cooldown_days: 30
+
+# --- T6: component inputs ---------------------------------------------------------
+# Macro has no direction on its own: a factor's sign for a ticker comes from the
+# sector's declared sensitivity, written down BEFORE the data pull. A factor with no
+# sensitivity here is scored n/a, never assumed neutral.
+components:
+  sector_exposures:
+    Semiconductors:
+      sensitivities:
+        policy_rate: -0.7
+        real_yields: -0.6
+        cpi: -0.5
+        dollar: -0.3
+        copper: 0.2
+      policy_stance: 0.2
+      policy_note: Export-control regime is the dominant policy variable; re-source each cycle.
+      policy_source: Federal Register / BIS rule updates
+    Energy:
+      sensitivities:
+        brent: 0.8
+        wti: 0.8
+        natural_gas: 0.5
+        dollar: -0.4
+        policy_rate: -0.2
+    Financials:
+      sensitivities:
+        policy_rate: 0.5
+        yield_curve: 0.7
+        credit_spreads: -0.6
+        real_gdp: 0.4
+    Index:
+      sensitivities:
+        policy_rate: -0.4
+        cpi: -0.4
+        real_gdp: 0.5
+        credit_spreads: -0.5
+  # Release-cadence-relative staleness bounds, per the plan's staleness table.
+  macro_max_age_days: 45
+  sentiment_max_age_days: 7
+  insider_window_days: 90
+  institutional_max_age_days: 135
+  eu_institutional_max_age_days: 90
+  catalyst_calendar_days: 30
+
+horizons:
+  weekly_target_dte: 7
+  monthly_target_dte: 30
+  distribution_dte: 7
+
+providers:
+  quotes: alpha_vantage
+  options: cboe
+  news: alpha_vantage
+  earnings: alpha_vantage
+  macro: fmp
+
+preflight:
+  enabled: true
+  default_probe_symbols:
+    US: SPY
+    EU: RHM
+  cache_only: false
+  write_latest: true
+
+option_filters:
+  min_open_interest: 10
+  min_volume: 1
+  max_bid_ask_width_pct: 0.25
+  max_quote_age_minutes: 30
+
+signals:
+  high_iv_rank: 70
+  low_iv_rank: 30
+  long_premium_iv_rank: 25
+  catalyst_window_days: 10
+
+# --- T8: strategy and execution rule engine ---------------------------------------
+# Boundary values, not suggestions: a rule that misses one of these refuses rather
+# than emitting a softer setup.
+strategy:
+  # Volatility structures.
+  short_premium_iv_rank_min: 70
+  long_premium_iv_rank_max: 25
+  short_premium_min_vrp: 0.0
+  extreme_skew_rr: 0.05
+  skew_percentile_low: 10
+  skew_percentile_high: 90
+  skew_min_tail_edge: 0.02
+
+  # Directional bands, mirroring the Score Interpretation table.
+  neutral_score_band: 0.15
+  strong_score_threshold: 0.60
+  require_confirmed_catalyst_for_event: true
+  # The plan authorises a short/put expression only with borrow and Tier A/B.
+  require_borrow_for_bearish: true
+
+  # Chain liquidity, judged against `option_filters` above.
+  min_chain_quotes: 20
+  min_liquid_strike_fraction: 0.30
+
+  event_day_multiplier: 1.5
+  catalyst_window_days: 10
+
+  # Factor certificate / knock-out guard. A routine daily move at or beyond
+  # `leverage_knockout_buffer * (1 / L)` refuses the leverage outright.
+  default_leverage: 5.0
+  leverage_knockout_buffer: 0.5
+  # Set a percentage to cap the simulated daily-reset drag over the holding window.
+  max_window_drag_pct: null
+
+  max_setups_per_ticker: 3
+
+# --- T10: full-run orchestration ---------------------------------------------------
+# Default to fixture data so local acceptance tests run without credentials. Set
+# `data_mode: live` or pass `--data-mode live` to fetch provider-backed market data
+# after the candidate gate. Live mode uses CBOE delayed options by default, plus
+# Alpha Vantage/FMP when their API keys are present or cache-only replay is enabled.
+pipeline:
+  data_mode: fixture
+  skip_non_market_days: true
+  max_tickers: null
+
+manual_catalysts: []
+
+delivery:
+  html_enabled: true
+  json_enabled: true
+  email_enabled: false
+  discord_enabled: false

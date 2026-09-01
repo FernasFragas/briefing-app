@@ -1,0 +1,319 @@
+# Fixed briefing universe - the 8-12 liquid names followed every run.
+#
+# ILLUSTRATIVE ONLY. Catalyst dates here are placeholders: re-source every date from
+# issuer IR or an exchange/regulator calendar before a real run. The gate checks that a
+# dated catalyst exists in the horizon, not that the date is correct.
+
+source: fixed_universe
+
+defaults:
+  geography: US
+  currency: USD
+  broker: IBKR
+  permitted_instruments: [shares, options]
+
+candidates:
+  - ticker: SPY
+    name: SPDR S&P 500 ETF Trust
+    venue: ARCA
+    sector: Index
+    direction: neutral
+    expression_class: V
+    horizon_days: 14
+    thesis: Index vol structure - IV rank versus realized around the macro print.
+    permitted_instruments: [etf, options]
+    thesis_sources:
+      - label: CBOE delayed options chain
+        kind: exchange
+    catalysts:
+      - name: US CPI (August)
+        date: 2026-09-10
+        status: confirmed
+        kind: macro
+        source: BLS release calendar
+
+  - ticker: QQQ
+    name: Invesco QQQ Trust
+    venue: NASDAQ
+    sector: Index
+    direction: neutral
+    expression_class: V
+    horizon_days: 21
+    thesis: Nasdaq-100 term structure into the rate decision.
+    permitted_instruments: [etf, options]
+    thesis_sources:
+      - label: CBOE delayed options chain
+        kind: exchange
+    catalysts:
+      - name: FOMC decision
+        date: 2026-09-16
+        status: confirmed
+        kind: macro
+        source: Federal Reserve calendar
+
+  - ticker: NVDA
+    sector: Semiconductors
+    direction: long
+    expression_class: E
+    horizon_days: 10
+    thesis: Earnings event - is the move already priced by the straddle?
+    thesis_sources:
+      - label: Company IR earnings date
+        kind: company_ir
+    catalysts:
+      - name: Quarterly results
+        date: 2026-09-02
+        status: confirmed
+        kind: earnings
+        source: Company IR
+
+  - ticker: AAPL
+    sector: Hardware
+    direction: long
+    expression_class: E
+    horizon_days: 14
+    crowding: consensus
+    thesis: Product event directional - positioning versus a widely telegraphed date.
+    permitted_instruments: [shares, options, knock_out]
+    thesis_sources:
+      - label: Company IR event page
+        kind: company_ir
+    catalysts:
+      - name: September product event
+        date: 2026-09-09
+        status: estimated
+        kind: product
+        telegraphed: true
+        source: Historical cadence
+
+  - ticker: MSFT
+    sector: Software
+    direction: neutral
+    expression_class: V
+    horizon_days: 14
+    thesis: Premium richness versus 20d realized into the macro print.
+    thesis_sources:
+      - label: CBOE delayed options chain
+        kind: exchange
+    catalysts:
+      - name: US CPI (August)
+        date: 2026-09-10
+        status: confirmed
+        kind: macro
+        source: BLS release calendar
+
+  - ticker: AMD
+    sector: Semiconductors
+    direction: long
+    expression_class: E
+    horizon_days: 14
+    thesis: Product launch directional with an unconfirmed date.
+    catalysts:
+      - name: Data-centre product launch
+        date: 2026-09-04
+        status: estimated
+        kind: product
+        source: Historical cadence
+
+  - ticker: TSLA
+    sector: Autos
+    direction: neutral
+    expression_class: V
+    horizon_days: 10
+    thesis: Vol structure into deliveries - catalyst sits outside the 10d horizon.
+    thesis_sources:
+      - label: CBOE delayed options chain
+        kind: exchange
+    catalysts:
+      - name: Q3 deliveries
+        date: 2026-10-02
+        status: estimated
+        kind: operational
+        source: Historical cadence
+
+  - ticker: META
+    sector: Internet
+    direction: long
+    expression_class: E
+    horizon_days: 21
+    thesis: Developer conference event directional.
+    thesis_sources:
+      - label: Company IR event page
+        kind: company_ir
+    catalysts:
+      - name: Developer conference
+        date: 2026-09-17
+        status: estimated
+        kind: product
+        source: Historical cadence
+
+  - ticker: AMZN
+    sector: Internet
+    direction: neutral
+    expression_class: V
+    horizon_days: 14
+    thesis: Skew versus own history into the macro print.
+    thesis_sources:
+      - label: CBOE delayed options chain
+        kind: exchange
+    catalysts:
+      - name: US CPI (August)
+        date: 2026-09-10
+        status: confirmed
+        kind: macro
+        source: BLS release calendar
+
+  - ticker: GOOGL
+    sector: Internet
+    direction: long
+    expression_class: E
+    horizon_days: 14
+    thesis: Regulatory decision event directional.
+    thesis_sources:
+      - label: Court docket
+        kind: regulator
+    catalysts:
+      - name: Antitrust remedies ruling
+        date: 2026-09-08
+        status: confirmed
+        kind: regulatory
+        source: Court docket
+
+  # --- Added 2026-08-31 ----------------------------------------------------------
+  #
+  # Source coverage was probed per symbol before these were added, because FMP's free
+  # plan gates by symbol as well as by endpoint. Results (2026-08-31):
+  #
+  #   ticker   FMP quote/prices          CBOE delayed chain
+  #   INTC     200 (NASDAQ, $89.47)      200, 2,376 contracts
+  #   CRWV     402 symbol gate           200, 1,922 contracts
+  #   AMAT     402 symbol gate           200, 3,236 contracts
+  #   RHM.DE   402 symbol gate           403 AccessDenied (US venue only)
+  #   LDO.MI   402 symbol gate           403 AccessDenied (US venue only)
+  #
+  # Only INTC has a complete data path today. The consequences are structural, not
+  # cosmetic, so they are recorded here rather than discovered per run:
+  #
+  #   CRWV, AMAT  - options chain resolves, but no price history means no realized vol
+  #                 and no measured sigma range. "Missing measured sigma" is a universal
+  #                 Tier C floor (T7), so both stay watchlist-only until the FMP symbol
+  #                 gate is resolved (PA4/PB4/I13 - the A2 decision now covers 4 names,
+  #                 not 2). Alpha Vantage `daily` is the documented fallback and is
+  #                 currently refusing every function, so it is not a fallback today.
+  #   RHM.DE,     - no options chain at all, so S_O is n/a. Both V and E require S_O
+  #   LDO.MI        (REQUIRED_COMPONENTS, models/scoring.py:33), which is the demotion
+  #                 `eu_options_track: C` already describes. Class P would avoid S_O but
+  #                 is not in `enabled_expression_classes`, and P requires S_I and S_F,
+  #                 which have no live source either. Tier C until a Eurex per-strike
+  #                 capture exists (schemas/eurex_options_manual_capture.csv).
+  #
+  # CATALYST DATES BELOW ARE UNSOURCED PLACEHOLDERS. Every `estimated` entry here is a
+  # cadence guess, not a calendar reading. Re-source each one from issuer IR before any
+  # live run, exactly as the file header requires. The gate checks that a dated catalyst
+  # exists in the horizon, never that the date is right.
+
+  - ticker: INTC
+    name: Intel Corporation
+    venue: NASDAQ
+    sector: Semiconductors
+    direction: long
+    expression_class: E
+    horizon_days: 21
+    thesis: Foundry milestone event directional - is the move already priced by the straddle?
+    thesis_sources:
+      - label: Company IR event page
+        kind: company_ir
+    catalysts:
+      - name: Foundry / product update
+        date: 2026-09-15
+        status: estimated
+        kind: product
+        source: Historical cadence
+
+  - ticker: CRWV
+    name: CoreWeave Inc.
+    venue: NASDAQ
+    sector: AI Infrastructure
+    direction: neutral
+    expression_class: V
+    horizon_days: 21
+    thesis: >-
+      High-multiple AI infrastructure vol structure into the rate decision. Priced from
+      the CBOE chain alone - no price history source, so no measured range.
+    thesis_sources:
+      - label: CBOE delayed options chain
+        kind: exchange
+    catalysts:
+      - name: FOMC decision
+        date: 2026-09-16
+        status: confirmed
+        kind: macro
+        source: Federal Reserve calendar
+
+  - ticker: AMAT
+    name: Applied Materials Inc.
+    venue: NASDAQ
+    sector: Semiconductor Equipment
+    direction: neutral
+    expression_class: V
+    horizon_days: 14
+    thesis: >-
+      Semicap premium richness versus realized into the macro print. Export-control
+      policy is the dominant variable and is re-sourced each cycle.
+    thesis_sources:
+      - label: CBOE delayed options chain
+        kind: exchange
+    catalysts:
+      - name: US CPI (August)
+        date: 2026-09-10
+        status: confirmed
+        kind: macro
+        source: BLS release calendar
+
+  - ticker: RHM.DE
+    name: Rheinmetall AG
+    venue: XETRA
+    geography: EU
+    currency: EUR
+    sector: Defence
+    direction: long
+    expression_class: E
+    horizon_days: 21
+    # Shares only: no per-strike EU chain is available, so an options expression could
+    # not be priced or invalidated. Leverage is blocked anyway on an estimated catalyst.
+    permitted_instruments: [shares]
+    thesis: >-
+      European rearmament budget cycle, expressed in shares. S_O is n/a with no Eurex
+      capture, so this is a Tier C watchlist name by construction.
+    thesis_sources:
+      - label: Company IR reporting calendar
+        kind: company_ir
+    catalysts:
+      - name: European defence budget cycle update
+        date: 2026-09-18
+        status: estimated
+        kind: policy
+        source: Historical cadence
+
+  - ticker: LDO.MI
+    name: Leonardo S.p.A.
+    venue: BORSA_ITALIANA
+    geography: EU
+    currency: EUR
+    sector: Defence
+    direction: long
+    expression_class: E
+    horizon_days: 21
+    permitted_instruments: [shares]
+    thesis: >-
+      European defence prime tracking the same rearmament budget cycle as RHM.DE.
+      S_O is n/a with no Eurex capture, so Tier C watchlist by construction.
+    thesis_sources:
+      - label: Company IR reporting calendar
+        kind: company_ir
+    catalysts:
+      - name: European defence budget cycle update
+        date: 2026-09-18
+        status: estimated
+        kind: policy
+        source: Historical cadence

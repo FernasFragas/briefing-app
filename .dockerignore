@@ -1,0 +1,17 @@
+.idea/
+.git
+.agents
+.codex
+.env
+.venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+data/
+output/
+node_modules/
+dist/
+build/
+.DS_Store
