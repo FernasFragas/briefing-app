@@ -1,0 +1,3 @@
+ALTER TABLE setup_signal
+  ADD COLUMN IF NOT EXISTS grade_letter TEXT,
+  ADD COLUMN IF NOT EXISTS grade_score NUMERIC;
