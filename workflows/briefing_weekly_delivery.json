@@ -1,0 +1,232 @@
+{
+  "name": "Briefing App - Weekly Delivery",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 6 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "weekly-0630-cron",
+      "name": "Weekly 06:30 Europe/Lisbon",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 180]
+    },
+    {
+      "parameters": {
+        "jsCode": "const timezone = $env.GENERIC_TIMEZONE || 'Europe/Lisbon';\nconst parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short' }).formatToParts(new Date());\nconst get = type => parts.find(part => part.type === type)?.value;\nconst run_date = `${get('year')}-${get('month')}-${get('day')}`;\nconst weekday = get('weekday');\nconst holidays = new Set(($env.MARKET_HOLIDAYS || '').split(',').map(value => value.trim()).filter(Boolean));\nconst is_weekday = !['Sat', 'Sun'].includes(weekday);\nconst is_market_day = is_weekday && !holidays.has(run_date);\nreturn [{ json: { run_date, timezone, weekday, is_market_day, guard_reason: is_market_day ? null : 'not a market day', run_endpoint: $env.APP_WEEKLY_RUN_URL || 'http://app:8000/run/weekly', delivery_endpoint: $env.STATIC_DELIVERY_URL || 'http://app:8000/delivery/static' } }];"
+      },
+      "id": "market-day-guard",
+      "name": "Market Day Guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [260, 90]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_market_day }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "is-market-day",
+      "name": "Is Market Day?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [520, 90]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.run_endpoint || $env.APP_WEEKLY_RUN_URL || 'http://app:8000/run/weekly' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.APP_RUN_TOKEN}}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "run-weekly-briefing",
+      "name": "Run Weekly Briefing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [780, 0],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ ($json.statusCode >= 200 && $json.statusCode < 300) && ['succeeded','partial'].includes(($json.body || $json).status) && !!(($json.body || $json).html_path) && !!(($json.body || $json).json_path) }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "app-run-succeeded",
+      "name": "App Run Succeeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1040, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.STATIC_DELIVERY_URL || 'http://app:8000/delivery/static' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.APP_RUN_TOKEN}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body || $json) }}",
+        "options": {
+          "timeout": 300000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "publish-static-html-json",
+      "name": "Publish Static HTML/JSON",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1300, -80],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ ($json.statusCode >= 200 && $json.statusCode < 300) && !!(($json.body || $json).latest_html_path) && !!(($json.body || $json).latest_json_path) }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "delivery-succeeded",
+      "name": "Delivery Succeeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1560, -80]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body || $json;\nreturn [{ json: { adapter: body.adapter || 'static_html', run_id: body.run_id, run_date: body.run_date, html_path: body.latest_html_path, json_path: body.latest_json_path, manifest_path: body.manifest_path, published_at: body.published_at, warnings: body.warnings || [] } }];"
+      },
+      "id": "delivery-summary",
+      "name": "Delivery Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1820, -160]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { run_id: 'not-started', stage: 'market_day_guard', ticker: '*', reason: $json.guard_reason || 'not a market day', run_date: $json.run_date, status: 'skipped' } }];"
+      },
+      "id": "market-closed",
+      "name": "Market Closed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [780, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $json.body || $json;\nconst failures = Array.isArray(response.failures) ? response.failures : [];\nconst first = failures[0] || {};\nconst detail = response.detail || {};\nreturn [{ json: { run_id: response.run_id || detail.run_id || 'unknown', stage: first.stage || detail.stage || 'run_weekly', ticker: first.ticker || detail.ticker || '*', reason: first.message || detail.reason || response.message || $json.error?.message || 'app response failed', status_code: $json.statusCode || null, response_status: response.status || null } }];"
+      },
+      "id": "format-error-branch",
+      "name": "Format Error Branch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 180]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{ "node": "Market Day Guard", "type": "main", "index": 0 }]]
+    },
+    "Weekly 06:30 Europe/Lisbon": {
+      "main": [[{ "node": "Market Day Guard", "type": "main", "index": 0 }]]
+    },
+    "Market Day Guard": {
+      "main": [[{ "node": "Is Market Day?", "type": "main", "index": 0 }]]
+    },
+    "Is Market Day?": {
+      "main": [
+        [{ "node": "Run Weekly Briefing", "type": "main", "index": 0 }],
+        [{ "node": "Market Closed", "type": "main", "index": 0 }]
+      ]
+    },
+    "Run Weekly Briefing": {
+      "main": [[{ "node": "App Run Succeeded?", "type": "main", "index": 0 }]]
+    },
+    "App Run Succeeded?": {
+      "main": [
+        [{ "node": "Publish Static HTML/JSON", "type": "main", "index": 0 }],
+        [{ "node": "Format Error Branch", "type": "main", "index": 0 }]
+      ]
+    },
+    "Publish Static HTML/JSON": {
+      "main": [[{ "node": "Delivery Succeeded?", "type": "main", "index": 0 }]]
+    },
+    "Delivery Succeeded?": {
+      "main": [
+        [{ "node": "Delivery Summary", "type": "main", "index": 0 }],
+        [{ "node": "Format Error Branch", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "timezone": "Europe/Lisbon",
+    "executionTimeout": 900,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all"
+  },
+  "active": false,
+  "versionId": "briefing-t11-weekly",
+  "id": "briefing-t11-weekly",
+  "tags": []
+}

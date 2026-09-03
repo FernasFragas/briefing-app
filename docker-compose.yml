@@ -1,0 +1,172 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_RUN_TOKEN: ${APP_RUN_TOKEN:-dev-token}
+      BRIEFING_CONFIG_PATH: ${BRIEFING_CONFIG_PATH:-/app/config/config.example.yaml}
+      BRIEFING_SOURCE_REGISTRY_PATH: ${BRIEFING_SOURCE_REGISTRY_PATH:-/app/config/source_registry.yaml}
+      BRIEFING_DATA_DIR: ${BRIEFING_DATA_DIR:-/app/data}
+      BRIEFING_OUTPUT_DIR: ${BRIEFING_OUTPUT_DIR:-/app/output}
+      BRIEFING_HTTP_TIMEOUT_SECONDS: ${BRIEFING_HTTP_TIMEOUT_SECONDS:-10}
+      BRIEFING_USER_AGENT: ${BRIEFING_USER_AGENT:-briefing-app/0.1 contact@example.com}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-briefing}:${POSTGRES_PASSWORD:-briefing_dev}@postgres:5432/${POSTGRES_DB:-briefing}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Europe/Lisbon}
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
+      FMP_API_KEY: ${FMP_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss:120b}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./src:/app/src:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-briefing}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-briefing_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-briefing}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-briefing} -d ${POSTGRES_DB:-briefing}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  sandbox-certs:
+    image: ghcr.io/n8n-io/n8n-sandbox-service-api:latest
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        bootstrap-mtls.sh --out-dir /tls --api-san sandbox-api
+        --control-san-prefix sandbox-runner --world-readable &&
+        chown -R sandbox-api:sandbox-api /tls/api && chmod -R a+rX /tls
+    environment:
+      NUM_RUNNERS: "1"
+    volumes:
+      - sandbox-tls:/tls
+
+  sandbox-api:
+    image: ghcr.io/n8n-io/n8n-sandbox-service-api:latest
+    environment:
+      SANDBOX_API_KEYS: ${SANDBOX_API_KEYS:-change-me-sandbox-api-key}
+      SANDBOX_API_RUNNER_REGISTRATION_TOKEN: ${SANDBOX_API_RUNNER_REGISTRATION_TOKEN:-change-me-sandbox-registration-token}
+      SANDBOX_API_RUNNER_API_KEY: ${SANDBOX_API_RUNNER_API_KEY:-change-me-sandbox-runner-key}
+      SANDBOX_API_GRPC_TLS_CERT_FILE: /tls/api/grpc-server.crt
+      SANDBOX_API_GRPC_TLS_KEY_FILE: /tls/api/grpc-server.key
+      SANDBOX_API_GRPC_TLS_CLIENT_CA_FILE: /tls/api/ca.crt
+      SANDBOX_API_RUNNER_CONTROL_GRPC_TLS_CA_FILE: /tls/api/ca.crt
+      SANDBOX_API_RUNNER_CONTROL_GRPC_TLS_CERT_FILE: /tls/api/control-grpc-api-client.crt
+      SANDBOX_API_RUNNER_CONTROL_GRPC_TLS_KEY_FILE: /tls/api/control-grpc-api-client.key
+      SANDBOX_API_RUNNER_CONTROL_GRPC_TLS_SERVER_NAME: sandbox-runner-1
+    volumes:
+      - sandbox-tls:/tls:ro
+    depends_on:
+      sandbox-certs:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  sandbox-runner-1:
+    image: ghcr.io/n8n-io/n8n-sandbox-service-runner-dind:latest
+    privileged: true
+    environment:
+      SANDBOX_RUNNER_API_KEYS: ${SANDBOX_API_RUNNER_API_KEY:-change-me-sandbox-runner-key}
+      SANDBOX_RUNNER_REGISTRATION_TOKEN: ${SANDBOX_API_RUNNER_REGISTRATION_TOKEN:-change-me-sandbox-registration-token}
+      SANDBOX_RUNNER_API_GRPC_ADDR: sandbox-api:9090
+      SANDBOX_RUNNER_HTTP_BASE_URL: http://sandbox-runner-1:8080
+      SANDBOX_RUNNER_CONTROL_GRPC_LISTEN_ADDR: ":9091"
+      SANDBOX_RUNNER_CONTROL_GRPC_ADVERTISE_ADDR: sandbox-runner-1:9091
+      SANDBOX_RUNNER_ID: runner-1
+      SANDBOX_RUNNER_DOCKER_SANDBOX_IMAGE: ghcr.io/n8n-io/n8n-sandbox-service-sandbox:latest
+      SANDBOX_RUNNER_REGISTRATION_GRPC_CA_FILE: /tls/runner/ca.crt
+      SANDBOX_RUNNER_REGISTRATION_GRPC_CERT_FILE: /tls/runner/grpc-client.crt
+      SANDBOX_RUNNER_REGISTRATION_GRPC_KEY_FILE: /tls/runner/grpc-client.key
+      SANDBOX_RUNNER_REGISTRATION_GRPC_SERVER_NAME: sandbox-api
+      SANDBOX_RUNNER_CONTROL_GRPC_TLS_CERT_FILE: /tls/runner/control-grpc-server.crt
+      SANDBOX_RUNNER_CONTROL_GRPC_TLS_KEY_FILE: /tls/runner/control-grpc-server.key
+      SANDBOX_RUNNER_CONTROL_GRPC_TLS_CLIENT_CA_FILE: /tls/runner/ca.crt
+    volumes:
+      - sandbox-tls:/tls:ro
+    depends_on:
+      sandbox-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  searxng:
+    image: ghcr.io/searxng/searxng:latest
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-change-me-searxng-secret}
+    volumes:
+      - ./searxng-settings.yml:/etc/searxng/settings.yml:ro
+    restart: unless-stopped
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    environment:
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Europe/Lisbon}
+      N8N_SECURE_COOKIE: "false"
+      N8N_ENABLED_MODULES: ${N8N_ENABLED_MODULES:-instance-ai}
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: ${N8N_BLOCK_ENV_ACCESS_IN_NODE:-false}
+      N8N_INSTANCE_AI_SANDBOX_ENABLED: ${N8N_INSTANCE_AI_SANDBOX_ENABLED:-true}
+      N8N_INSTANCE_AI_SANDBOX_PROVIDER: ${N8N_INSTANCE_AI_SANDBOX_PROVIDER:-n8n-sandbox}
+      N8N_INSTANCE_AI_SANDBOX_IMAGE: ${N8N_INSTANCE_AI_SANDBOX_IMAGE:-ghcr.io/n8n-io/n8n-sandbox-service-sandbox:latest}
+      N8N_SANDBOX_SERVICE_URL: ${N8N_SANDBOX_SERVICE_URL:-http://sandbox-api:8080}
+      N8N_SANDBOX_SERVICE_API_KEY: ${N8N_SANDBOX_SERVICE_API_KEY:-change-me-sandbox-api-key}
+      N8N_INSTANCE_AI_SEARXNG_URL: ${N8N_INSTANCE_AI_SEARXNG_URL:-http://searxng:8080}
+      APP_RUN_URL: ${APP_RUN_URL:-http://app:8000/run/daily}
+      APP_DAILY_RUN_URL: ${APP_DAILY_RUN_URL:-http://app:8000/run/daily}
+      APP_WEEKLY_RUN_URL: ${APP_WEEKLY_RUN_URL:-http://app:8000/run/weekly}
+      APP_RUN_TOKEN: ${APP_RUN_TOKEN:-dev-token}
+      STATIC_DELIVERY_URL: ${STATIC_DELIVERY_URL:-http://app:8000/delivery/static}
+      MARKET_HOLIDAYS: ${MARKET_HOLIDAYS:-}
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./output:/output:ro
+      - ./workflows:/workflows
+    depends_on:
+      app:
+        condition: service_healthy
+      sandbox-api:
+        condition: service_healthy
+      searxng:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  n8n_data:
+  sandbox-tls:
