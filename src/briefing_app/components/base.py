@@ -4,13 +4,20 @@ Every component answers the same four questions - what is the score, what went i
 where did each number come from, and what could not be measured - so T7 can weight them
 uniformly and T9 can render them without special cases.
 
-Two rules are enforced here rather than left to each component:
+Three rules are enforced here rather than left to each component:
 
 1. A missing sub-score is `n/a`. Its weight is dropped and the remaining weights are
    re-normalized to 1.0, with the re-weighting disclosed. It is never scored as zero,
    which would silently drag a component toward neutral.
 2. A reading past its staleness bound is not a reading. Bounds are release-cadence
    relative, so each component declares its own.
+3. A leg may declare a `max_weight`: a ceiling on the share re-normalization can hand
+   it. Rule 1 hands a surviving leg the weight of every dropped one, which promotes
+   exactly the legs a framework deliberately weighted low - so a leg that is only ever
+   corroboration says so, and the freed weight goes to the legs that are not.
+   **If every measurable leg is capped there is nothing left to absorb the remainder,
+   and the component is `n/a`** - a component built only from legs none of which may
+   carry it is not a measurement.
 """
 
 from __future__ import annotations
@@ -76,6 +83,10 @@ class SubScore:
 
     `score` is `None` when the leg could not be measured; `na_reason` then says why, and
     the leg's weight is re-normalized away instead of counting as neutral.
+
+    `max_weight` is the ceiling on the share re-normalization may hand this leg. It is
+    the difference between "this leg is worth 20 percent" and "this leg is worth at most
+    20 percent", and only the second survives a component whose heavier legs go missing.
     """
 
     name: str
@@ -87,6 +98,7 @@ class SubScore:
     as_of: date_type | None = None
     sample_size: int = 0
     inputs: dict[str, Any] = field(default_factory=dict)
+    max_weight: float | None = None
 
     def __post_init__(self) -> None:
         if self.weight < 0:
@@ -97,6 +109,11 @@ class SubScore:
             )
         if self.score is None and not self.na_reason:
             raise ComponentError(f"sub-score {self.name} is n/a with no reason given")
+        if self.max_weight is not None and not 0.0 < self.max_weight <= 1.0:
+            raise ComponentError(
+                f"sub-score {self.name} has max_weight {self.max_weight}, "
+                "outside 0.0 (exclusive) .. 1.0"
+            )
 
     @property
     def available(self) -> bool:
@@ -108,6 +125,7 @@ class SubScore:
             "score": self.score,
             "weight": self.weight,
             "weight_used": weight_used,
+            "max_weight": self.max_weight,
             "available": self.available,
             "na_reason": self.na_reason,
             "detail": self.detail,
@@ -118,19 +136,35 @@ class SubScore:
         }
 
 
+#: Weights are floats, so a cap can be missed or spuriously triggered by the last bit.
+_WEIGHT_EPSILON = 1e-12
+
+
 def combine_sub_scores(
     sub_scores: Sequence[SubScore],
 ) -> tuple[float | None, dict[str, float], list[str]]:
-    """Weighted mean over available legs, re-normalized to 1.0.
+    """Weighted mean over available legs, re-normalized to 1.0 and honouring caps.
 
     Returns `(score, weights_used, disclosures)`. `score` is `None` when no leg could be
-    measured. `disclosures` names every dropped leg so the re-weighting is never silent.
+    measured, and also when every measurable leg declares a `max_weight`: nothing is then
+    entitled to the weight re-normalization frees, and a component assembled entirely
+    out of capped legs is not a measurement. `disclosures` names every dropped leg and
+    every cap that bound, so neither the re-weighting nor its refusal is ever silent.
     """
     available = [s for s in sub_scores if s.available and s.weight > 0]
     weights_used: dict[str, float] = {s.name: 0.0 for s in sub_scores}
     disclosures: list[str] = []
 
     for dropped in (s for s in sub_scores if not s.available):
+        if dropped.weight <= 0:
+            # A leg carrying no weight was not dropped by this run; its weight was
+            # removed from the table because the leg can never be measured. Saying it
+            # was "re-normalized" would describe arithmetic that did not happen.
+            disclosures.append(
+                f"{dropped.name} is n/a ({dropped.na_reason}); it carries no weight, so "
+                "nothing was re-normalized."
+            )
+            continue
         disclosures.append(
             f"{dropped.name} is n/a ({dropped.na_reason}); its {dropped.weight:.2f} "
             "weight was dropped and the remainder re-normalized."
@@ -140,11 +174,45 @@ def combine_sub_scores(
     if not available or total_weight <= 0:
         return None, weights_used, disclosures
 
+    used = {s.name: s.weight / total_weight for s in available}
+    capped: dict[str, SubScore] = {}
+    while True:
+        binding = [
+            s
+            for s in available
+            if s.name not in capped
+            and s.max_weight is not None
+            and used[s.name] > s.max_weight + _WEIGHT_EPSILON
+        ]
+        if not binding:
+            break
+        for sub in binding:
+            disclosures.append(
+                f"{sub.name} re-normalized to {used[sub.name]:.4f}, above its "
+                f"{sub.max_weight:.2f} ceiling; it was held at the ceiling and the "
+                "excess passed to the uncapped legs."
+            )
+            used[sub.name] = float(sub.max_weight)
+            capped[sub.name] = sub
+
+        uncapped = [s for s in available if s.name not in capped]
+        pool = sum(s.weight for s in uncapped)
+        if not uncapped or pool <= 0:
+            disclosures.append(
+                "Every measurable leg is weight-capped, so no leg may carry the "
+                f"{1.0 - sum(used[name] for name in capped):.4f} weight re-normalization "
+                "freed; the component is n/a rather than scored off capped legs alone."
+            )
+            return None, {s.name: 0.0 for s in sub_scores}, disclosures
+
+        free = 1.0 - sum(used[name] for name in capped)
+        for sub in uncapped:
+            used[sub.name] = free * (sub.weight / pool)
+
     score = 0.0
     for sub in available:
-        used = sub.weight / total_weight
-        weights_used[sub.name] = used
-        score += (sub.score or 0.0) * used
+        weights_used[sub.name] = used[sub.name]
+        score += (sub.score or 0.0) * used[sub.name]
     return clamp(score), weights_used, disclosures
 
 

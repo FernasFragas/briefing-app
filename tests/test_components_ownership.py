@@ -21,6 +21,7 @@ from briefing_app.components import (
     extract_activity,
     role_weight,
 )
+from briefing_app.components.insider import INDEX_INSIDER_NA_REASON
 from briefing_app.models.market_data import InsiderTransaction, OwnershipChange
 
 RUN_DATE = date(2026, 8, 29)
@@ -334,3 +335,40 @@ def test_eu_ownership_uses_the_eu_staleness_bound() -> None:
 
     assert eu.score is None and "90-day release cadence" in (eu.na_reason or "")
     assert us.score is not None
+
+
+def test_an_index_candidate_has_no_insider_component_to_measure() -> None:
+    """PC3. "No Form 4 transactions available" reads like a quiet week at the filing desk.
+
+    For QQQ and SPY it is a category error: a fund has no officers and no directors, so
+    there is nothing to file and nothing to wait for. The reason has to say so, or the
+    row sits on the ledger being re-searched at every audit.
+    """
+
+    result = build_insider_component(
+        ticker="SPY",
+        geography="US",
+        run_date=RUN_DATE,
+        issuer_backed=False,
+        transactions=[insider()],
+    )
+
+    assert result.available is False
+    assert result.na_reason == INDEX_INSIDER_NA_REASON
+    assert "structurally n/a" in (result.na_reason or "")
+    assert "redistributed" in (result.na_reason or "")
+
+
+def test_an_issuer_with_no_filings_keeps_the_data_state_reason() -> None:
+    """A real company with a quiet quarter is not the same as a fund, and must not read
+    like one - that difference is the whole point of declaring the index case."""
+
+    result = build_insider_component(
+        ticker="XOM",
+        geography="US",
+        run_date=RUN_DATE,
+        transactions=[],
+    )
+
+    assert result.available is False
+    assert result.na_reason == "no Form 4 transactions available"

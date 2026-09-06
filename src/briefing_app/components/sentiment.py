@@ -1,9 +1,44 @@
 """`S_S` - the multi-channel sentiment matrix.
 
+The framework specifies three legs:
+
     S_S = (S_S1 * 0.45) + (S_S2 * 0.35) + (S_S3 * 0.20)
 
 `S_S1` institutional / analyst, `S_S2` executive and transcript tone, `S_S3` retail and
 social momentum. Retail is the 20 percent leg and never the thesis.
+
+**What ships is a two-leg table, and it is written that way on purpose (PC3):**
+
+    S_S = (S_S1 * 0.80) + (S_S3 * 0.20)          S_S2 declared, weight 0.00
+
+`S_S2` has never had a source and, on the evidence in `pa10-executive-tone.md`, never
+will on a free tier. Leaving 0.35 in the table and re-normalizing it away every single
+run made the printed weights describe a component that does not exist: the report said
+`0.45 / 0.35 / 0.20` and the score used `0.80 / - / 0.20`. PC3 asks for the weight of a
+structurally absent leg to be dropped rather than perpetually redistributed, so it is.
+
+**This changes no score.** Re-normalizing `0.45 / 0.20` under the retail cap already
+yielded `0.80 / 0.20`; the arithmetic is identical and the printed table is now the one
+actually used. The leg is still reported, with its reason - a dropped weight is a
+recorded decision, not a deletion. Restore it by giving `WEIGHT_EXECUTIVE` its 0.35 back
+and taking it off `WEIGHT_INSTITUTIONAL` if a transcript source is ever adopted.
+
+Two of the three legs are decided rather than measured, and the decisions are recorded
+here because they change the score:
+
+- **`executive_tone` is permanently n/a (Q1).** Transcripts are unsourceable on every
+  free tier this project can reach. Its weight is now stated as 0.00 rather than
+  redistributed per run, and the run still says so.
+- **Index and ETF candidates carry no analyst leg at all (PC3, 2026-09-03).** An index
+  has no issuer, so it has no ratings, no target revisions and no Form 4s. Three
+  providers agreed on the 09-03 run: FMP answered an empty root for SPY and 402 for QQQ,
+  Finnhub answered an empty root for both. That is a property of the instrument, so it is
+  declared rather than rediscovered - and the requests are not sent.
+- **Redistribution may not promote a leg past its nominal weight (Q1b, Q3).** That 0.35
+  has to go somewhere, and left alone it goes pro rata - which lifts retail attention to
+  0.308 and, inside the institutional leg, lets a local news lexicon grow from a sixth of
+  `S_S` to two thirds of it purely by analyst coverage going missing. Both are capped, so
+  a leg's share stops depending on what else failed.
 
 News sentiment is reported in full alongside the score - 24-hour aggregate, 7-day
 trailing baseline, the delta between them, article count, and top deduplicated
@@ -46,11 +81,68 @@ from briefing_app.models.market_data import (
     RetailMomentumSnapshot,
 )
 
-#: The weights are fixed by the framework. They are re-normalized only when a leg is
-#: unmeasurable, never adjusted to taste.
-WEIGHT_INSTITUTIONAL = 0.45
-WEIGHT_EXECUTIVE = 0.35
+#: The framework's own three-leg split, kept so the shipped table can be compared with
+#: the specification it descends from rather than quietly replacing it.
+FRAMEWORK_WEIGHTS: dict[str, float] = {
+    "institutional": 0.45,
+    "executive_tone": 0.35,
+    "retail_momentum": 0.20,
+}
+
+#: The shipped weights. They are re-normalized only when a leg is unmeasurable, never
+#: adjusted to taste - and `executive_tone`'s 0.00 is not an adjustment to taste but the
+#: recorded consequence of a leg that can never be measured (see the module docstring).
+#: `WEIGHT_INSTITUTIONAL` is 0.80 because that is precisely what re-normalization produced
+#: on every run under the retail cap; nothing about the score changes.
+WEIGHT_INSTITUTIONAL = 0.80
+WEIGHT_EXECUTIVE = 0.0
 WEIGHT_RETAIL = 0.20
+
+#: Q3. Re-normalization may not promote retail above its nominal weight.
+#:
+#: `executive_tone` is permanently n/a, so re-normalization was handing its 0.35 to the
+#: surviving legs pro rata and lifting retail from 0.20 to 0.308 - promoting the noisiest,
+#: most gameable leg precisely because a better one was missing. The floor of 10 in the
+#: attention-momentum denominator means a name going from 0 to 10 mentions scores +1.0,
+#: so that 0.308 is a third of `S_S` bought with ten Reddit posts. Redistribution stays
+#: the rule; retail is simply not allowed to be what it promotes.
+#:
+#: The cap also settles what happens when retail is the only measurable channel: a capped
+#: leg needs an uncapped one to absorb the remainder, and with none, `S_S` is n/a. Retail
+#: is the 20 percent leg and never the thesis - including when it is all there is.
+RETAIL_MAX_WEIGHT = WEIGHT_RETAIL
+
+#: Q1. `executive_tone` is not an absent reading, it is a decided one. FMP transcripts
+#: answer 402 and Finnhub's 403 on every free tier this project can reach, so the leg is
+#: recorded permanently n/a and its 0.35 is redistributed rather than shrinking `S_S`'s
+#: confidence. The consequence is stated on every run rather than left to be inferred:
+#: with no transcript channel, `S_S` carries no first-party issuer voice at all.
+EXECUTIVE_TONE_NA_REASON = (
+    "executive and transcript tone is permanently n/a: earnings-call transcripts are "
+    "unsourceable on every free tier this project can reach (FMP 402, Finnhub 403). "
+    "Its framework weight of 0.35 is declared as 0.00 rather than re-normalized away on "
+    "every run, so the printed weights are the ones the score used; the leg is reported, "
+    "not scored as neutral"
+)
+
+#: PC3, 2026-09-03. An index or fund has no issuer, so the analyst leg is not thin - it
+#: does not exist. Stated rather than rediscovered per run, and the fetches are skipped.
+INDEX_INSTITUTIONAL_NA_REASON = (
+    "analyst coverage is structurally n/a for an index or fund: ratings, target revisions "
+    "and issuer filings are published about companies, not about baskets. Confirmed on "
+    "2026-09-03 by three providers independently returning nothing for QQQ and SPY "
+    "(FMP empty root and HTTP 402, Finnhub empty root), so the requests are no longer sent"
+)
+
+#: With no analyst leg, retail attention is all an index candidate has - and Q3 forbids
+#: retail from carrying `S_S` alone. So `S_S` is n/a for index candidates by construction,
+#: and says which of the two rules put it there.
+INDEX_SENTIMENT_NA_REASON = (
+    "S_S is structurally n/a for an index or fund: its analyst leg does not exist "
+    "(instrument has no issuer) and retail attention is capped at "
+    f"{0.20:.2f} and may not carry the component alone. The weight is redistributed "
+    "across the available components, not scored as neutral"
+)
 
 #: Sentiment is a rolling read; anything older than a week is not current sentiment.
 MAX_AGE_DAYS = 7
@@ -64,6 +156,27 @@ POLITICAL_DISCLOSURE_LAG_DAYS = 45
 #: Windows for the news read.
 RECENT_WINDOW_HOURS = 24
 BASELINE_WINDOW_DAYS = 7
+
+#: Q1b. Explicit weights for the parts of the institutional leg.
+#:
+#: The leg used to be an unweighted mean of whichever of its parts happened to score, so
+#: the news read was `1/N` of it: 17.3% of `S_S` beside three analyst parts, 69.2% on its
+#: own. Since the news read is a local lexicon that measures about half the articles it is
+#: given, its influence was highest exactly where analyst coverage was thinnest - which is
+#: where it is least corroborated. Explicit weights fix each part's share instead.
+_INSTITUTIONAL_PART_WEIGHTS: dict[str, float] = {
+    "ratings": 0.35,
+    "revisions": 0.25,
+    "price_target": 0.15,
+    "news": 0.25,
+}
+
+#: The news read is corroboration inside an analyst leg, never the leg itself, so it is
+#: capped at its own nominal share. The cap pins the lexicon at 0.25 of whatever the leg
+#: carries however thin analyst coverage gets - and because a capped leg needs an uncapped
+#: one to absorb what re-normalization frees, a leg with no analyst part at all is n/a
+#: rather than a half-measured lexicon read wearing the institutional label.
+NEWS_MAX_LEG_SHARE = _INSTITUTIONAL_PART_WEIGHTS["news"]
 
 #: Rating text mapped to a directional score.
 _RATING_SCORES: tuple[tuple[tuple[str, ...], float], ...] = (
@@ -228,6 +341,7 @@ def build_sentiment_component(
     news: NewsSentimentBatch | None = None,
     analyst_signals: Sequence[AnalystSignal] = (),
     spot: float | None = None,
+    issuer_backed: bool = True,
     executive_tone: ToneReading | None = None,
     retail_momentum: ToneReading | RetailMomentumSnapshot | None = None,
     political_flow: Sequence[PoliticalTrade] | None = None,
@@ -251,12 +365,20 @@ def build_sentiment_component(
             f"{summary.article_count} articles before scoring."
         )
 
-    institutional = _institutional_sub_score(
-        analyst_signals,
-        summary,
-        spot=spot,
-        run_date=run_date,
-        max_age_days=max_age_days,
+    institutional = (
+        _institutional_sub_score(
+            analyst_signals,
+            summary,
+            spot=spot,
+            run_date=run_date,
+            max_age_days=max_age_days,
+        )
+        if issuer_backed
+        else SubScore(
+            name="institutional",
+            weight=WEIGHT_INSTITUTIONAL,
+            na_reason=INDEX_INSTITUTIONAL_NA_REASON,
+        )
     )
     executive = _tone_sub_score(
         executive_tone,
@@ -264,10 +386,7 @@ def build_sentiment_component(
         weight=WEIGHT_EXECUTIVE,
         run_date=run_date,
         max_age_days=max_age_days,
-        missing_reason=(
-            "no executive or transcript tone reading supplied; transcripts are not "
-            "fetched by this stack"
-        ),
+        missing_reason=EXECUTIVE_TONE_NA_REASON,
     )
     retail = _retail_sub_score(
         retail_momentum,
@@ -289,10 +408,16 @@ def build_sentiment_component(
     )
     sub_scores = base_sub_scores + ((political,) if political is not None else ())
     if political is not None:
-        if political.available:
+        if political.available and score is None:
+            weights_used = dict(weights_used)
+            weights_used["political_flow"] = 0.0
+            diagnostics.append(
+                "political_flow is a capped overlay on a base score, not a score; no base "
+                "leg carried S_S, so the overlay was not applied."
+            )
+        elif political.available:
             adjustment = (political.score or 0.0) * POLITICAL_FLOW_MAX_IMPACT
-            base_score = score or 0.0
-            unclamped_score = base_score + adjustment
+            unclamped_score = score + adjustment
             score = clamp(unclamped_score)
             weights_used = dict(weights_used)
             weights_used["political_flow"] = POLITICAL_FLOW_MAX_IMPACT
@@ -311,14 +436,34 @@ def build_sentiment_component(
             )
 
     if score is None:
+        measurable = [sub.name for sub in base_sub_scores if sub.available]
+        if not issuer_backed:
+            # A declared outcome, not a measurement failure. Saying "the only measurable
+            # channel is retail_momentum" here would invite a search for the analyst data
+            # that an index does not have and will never have.
+            reason = INDEX_SENTIMENT_NA_REASON
+        elif measurable:
+            reason = (
+                f"the only measurable channel is {', '.join(measurable)}, which is "
+                "weight-capped and may not carry S_S alone"
+            )
+        else:
+            reason = "no sentiment channel could be measured"
         return unavailable_component(
             component=SENTIMENT,
             ticker=clean_ticker,
             geography=geo,
             as_of=resolved_as_of,
-            reason="no sentiment channel could be measured",
+            reason=reason,
             sub_scores=sub_scores,
             diagnostics=diagnostics,
+        )
+
+    if not executive.available:
+        diagnostics.append(
+            "S_S carries no transcript channel: executive_tone is permanently n/a, so "
+            "the component has no first-party issuer voice and reads analyst coverage "
+            "beside two proxies - a local news lexicon and an attention counter."
         )
 
     if not institutional.available:
@@ -388,7 +533,19 @@ def build_sentiment_component(
         geography=geo,
         available=True,
         score=score,
-        validation_status=STATUS_VERIFIED if all(s.available for s in sub_scores) else STATUS_PARTIAL,
+        # Completeness is judged on the legs that actually carry weight. `executive_tone`
+        # is declared permanently n/a with weight 0.00 (Q1/PC3), and `political_flow` is a
+        # capped overlay rather than a base leg -- counting either against completeness
+        # made `S_S` structurally incapable of ever reading `verified`, for any name, on
+        # any run. That is not a measurement: a name with both weighted legs scored has
+        # 100% of the component's weight measured. It matters beyond cosmetics, because
+        # `S_S` is in `REQUIRED_COMPONENTS` for V and E, and a component that can never be
+        # verified would cap the entire universe at Tier B by construction.
+        validation_status=(
+            STATUS_VERIFIED
+            if all(s.available for s in base_sub_scores if s.weight > 0)
+            else STATUS_PARTIAL
+        ),
         source_quality=quality,
         sub_scores=sub_scores,
         weights_used=weights_used,
@@ -406,50 +563,74 @@ def _institutional_sub_score(
     run_date: date_type,
     max_age_days: int,
 ) -> SubScore:
-    """Analyst ratings and price targets, with the news delta as a secondary read."""
+    """Analyst ratings and price targets, with the news read as corroboration.
+
+    The parts carry the explicit weights in `_INSTITUTIONAL_PART_WEIGHTS` and are combined
+    by the same capped re-normalization the component's legs use, one level down. So the
+    news read is 0.25 of the leg whether it sits beside three analyst parts or one, and a
+    leg with no analyst part at all is `n/a` rather than a lexicon read at full weight.
+    """
     fresh = [s for s in signals if not is_stale(s.as_of, run_date=run_date, max_age_days=90)]
-    parts: list[tuple[str, float]] = []
+    measured: dict[str, float] = {}
     details: list[str] = []
     latest: date_type | None = max((s.as_of for s in fresh), default=None)
 
     ratings = [rating_score(s.rating) for s in fresh]
     ratings = [r for r in ratings if r is not None]
     if ratings:
-        parts.append(("ratings", sum(ratings) / len(ratings)))
+        measured["ratings"] = sum(ratings) / len(ratings)
         details.append(f"{len(ratings)} analyst ratings")
 
     revisions = [
         _revision_score(s) for s in fresh if _revision_score(s) is not None
     ]
     if revisions:
-        parts.append(("revisions", sum(revisions) / len(revisions)))  # type: ignore[arg-type]
+        measured["revisions"] = sum(revisions) / len(revisions)  # type: ignore[arg-type]
         details.append(f"{len(revisions)} rating or target revisions")
 
     upside = _price_target_upside(fresh, spot)
     if upside is not None:
-        parts.append(("price_target", clamp(upside / 0.25)))
+        measured["price_target"] = clamp(upside / 0.25)
         details.append(f"consensus target {upside:+.1%} vs spot")
 
     if summary.delta is not None:
-        parts.append(("news_delta", clamp(summary.delta * 2.0)))
+        measured["news"] = clamp(summary.delta * 2.0)
         details.append(
             f"news 24h {summary.recent_score:+.3f} vs 7d {summary.baseline_score:+.3f}"
         )
     elif summary.recent_score is not None:
-        parts.append(("news_level", clamp(summary.recent_score * 2.0)))
+        measured["news"] = clamp(summary.recent_score * 2.0)
         details.append(f"news 24h {summary.recent_score:+.3f} (no baseline yet)")
 
-    if not parts:
+    parts = [
+        SubScore(
+            name=name,
+            weight=weight,
+            score=measured.get(name),
+            na_reason=None if name in measured else f"no {name} reading in the window",
+            max_weight=NEWS_MAX_LEG_SHARE if name == "news" else None,
+        )
+        for name, weight in _INSTITUTIONAL_PART_WEIGHTS.items()
+    ]
+    score, part_weights, _part_disclosures = combine_sub_scores(parts)
+
+    if score is None:
         return SubScore(
             name="institutional",
             weight=WEIGHT_INSTITUTIONAL,
             na_reason=(
-                "no analyst ratings, target revisions, or scored news in the window"
+                (
+                    "the news read is the only measurable part and is capped at "
+                    f"{NEWS_MAX_LEG_SHARE:.2f} of the leg; a local-lexicon tone read "
+                    "corroborates analyst coverage rather than standing in for it"
+                )
+                if measured
+                else "no analyst ratings, target revisions, or scored news in the window"
             ),
             sample_size=len(signals),
+            inputs={name: round(value, 4) for name, value in measured.items()},
         )
 
-    score = sum(value for _name, value in parts) / len(parts)
     return SubScore(
         name="institutional",
         weight=WEIGHT_INSTITUTIONAL,
@@ -458,7 +639,14 @@ def _institutional_sub_score(
         source="analyst coverage and news sentiment",
         as_of=latest or (summary.as_of.date() if summary.as_of else None),
         sample_size=len(fresh) + summary.unique_article_count,
-        inputs={name: round(value, 4) for name, value in parts},
+        inputs={
+            **{name: round(value, 4) for name, value in measured.items()},
+            "part_weights_used": {
+                name: round(weight, 4)
+                for name, weight in part_weights.items()
+                if weight > 0
+            },
+        },
     )
 
 
@@ -488,6 +676,17 @@ def _price_target_upside(
     if not targets:
         return None
     return (sum(targets) / len(targets)) / spot - 1.0
+
+
+#: PC2, 2026-09-03. Below this many mentions on either side of the comparison, the
+#: "momentum" is one or two Reddit posts moving.
+#:
+#: The floor of 10 in the denominator already damps the *magnitude* of a thin reading, but
+#: it cannot make it mean anything: 1 mention against 2 is a coin flip wearing a number.
+#: This matters because paginating ApeWisdom (below) brings hundreds of one-mention names
+#: into range, and converting an honest `n/a` into a fabricated measurement is a worse
+#: outcome than the gap it closes.
+RETAIL_MIN_MENTIONS = 5
 
 
 def _retail_tone_reading(
@@ -528,10 +727,30 @@ def _retail_sub_score(
     run_date: date_type,
     max_age_days: int,
 ) -> SubScore:
+    if isinstance(reading, RetailMomentumSnapshot) and _is_thin(reading):
+        return SubScore(
+            name="retail_momentum",
+            weight=WEIGHT_RETAIL,
+            max_weight=RETAIL_MAX_WEIGHT,
+            na_reason=(
+                f"retail attention is too thin to read: {reading.mentions} mentions vs "
+                f"{reading.mentions_24h_ago} 24h ago, below the "
+                f"{RETAIL_MIN_MENTIONS}-mention floor; a one-post swing is not momentum"
+            ),
+            source=reading.source,
+            as_of=reading.as_of,
+            sample_size=reading.mentions,
+            inputs={
+                "mentions": reading.mentions,
+                "mentions_24h_ago": reading.mentions_24h_ago,
+                "rank": reading.rank,
+            },
+        )
     if isinstance(reading, RetailMomentumSnapshot) and reading.mentions_24h_ago is None:
         return SubScore(
             name="retail_momentum",
             weight=WEIGHT_RETAIL,
+            max_weight=RETAIL_MAX_WEIGHT,
             na_reason=(
                 "ApeWisdom row did not include mentions_24h_ago; attention level alone "
                 "is not momentum"
@@ -552,7 +771,17 @@ def _retail_sub_score(
         run_date=run_date,
         max_age_days=max_age_days,
         missing_reason="no retail or social momentum reading supplied",
+        max_weight=RETAIL_MAX_WEIGHT,
     )
+
+
+def _is_thin(reading: RetailMomentumSnapshot) -> bool:
+    """Whether both sides of the comparison are below the mention floor."""
+
+    prior = reading.mentions_24h_ago
+    if prior is None:
+        return False
+    return max(reading.mentions, prior) < RETAIL_MIN_MENTIONS
 
 
 def _political_flow_sub_score(
@@ -724,13 +953,17 @@ def _tone_sub_score(
     run_date: date_type,
     max_age_days: int,
     missing_reason: str,
+    max_weight: float | None = None,
 ) -> SubScore:
     if reading is None:
-        return SubScore(name=name, weight=weight, na_reason=missing_reason)
+        return SubScore(
+            name=name, weight=weight, na_reason=missing_reason, max_weight=max_weight
+        )
     if is_stale(reading.as_of, run_date=run_date, max_age_days=max_age_days):
         return SubScore(
             name=name,
             weight=weight,
+            max_weight=max_weight,
             na_reason=(
                 f"reading from {reading.as_of.isoformat()} is beyond the "
                 f"{max_age_days}-day sentiment staleness bound"
@@ -739,6 +972,7 @@ def _tone_sub_score(
     return SubScore(
         name=name,
         weight=weight,
+        max_weight=max_weight,
         score=clamp(reading.score),
         detail=reading.detail,
         source=reading.source,

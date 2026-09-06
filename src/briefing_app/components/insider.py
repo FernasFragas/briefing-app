@@ -86,6 +86,17 @@ DEFAULT_ROLE_LABEL = "other_insider"
 #: window the framework scores on.
 WINDOW_DAYS = 90
 
+#: PC3, 2026-09-03. Insider dealing is disclosed by the people who run a company. A fund
+#: has none, so `S_I` is not missing for an index candidate - it does not apply. Declared
+#: so the weight is redistributed with a named reason rather than reading as a data-state
+#: gap that a retry or a second provider might close.
+INDEX_INSIDER_NA_REASON = (
+    "insider activity is structurally n/a for an index or fund: Form 4 and MAR Article 19 "
+    "disclosures are filed by a company's own officers and directors, and a basket has "
+    "none. The weight is redistributed across the available components, not scored as "
+    "neutral"
+)
+
 #: Net dollar flow that saturates the score, so the reading stays in the unit of the
 #: input rather than an opaque constant.
 NET_VALUE_SCALE = 5_000_000.0
@@ -296,6 +307,7 @@ def build_insider_component(
     source_quality: str = QUALITY_PRIMARY,
     endpoint_or_file: str = "",
     run_id: int | None = None,
+    issuer_backed: bool = True,
 ) -> ComponentResult:
     """Score `S_I` from a filing feed, or return `n/a` with the reason."""
     geo = Geography(geography)
@@ -312,6 +324,19 @@ def build_insider_component(
         if is_eu
         else ()
     )
+
+    if not issuer_backed:
+        # PC3, 2026-09-03. "No Form 4 transactions available" reads like a quiet day at
+        # the filing desk. For an index or fund it is a category error: there is no
+        # issuer, no officers and no filings, so the absence is permanent and declared.
+        return unavailable_component(
+            component=INSIDER,
+            ticker=clean_ticker,
+            geography=geo,
+            as_of=resolved_as_of,
+            reason=INDEX_INSIDER_NA_REASON,
+            eu_substitutes=eu_substitutes,
+        )
 
     if not transactions:
         return unavailable_component(
