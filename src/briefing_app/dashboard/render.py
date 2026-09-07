@@ -23,7 +23,11 @@ def render_dashboard_html(payload: DashboardPayload) -> str:
     env.filters["score"] = _score
     env.filters["join_or_unavailable"] = _join_or_unavailable
     env.filters["json_pretty"] = _json_pretty
-    return env.from_string(_TEMPLATE).render(payload=payload)
+    env.filters["component_count"] = _component_count
+    env.filters["thin_evidence"] = _thin_evidence
+    return env.from_string(_TEMPLATE).render(
+        payload=payload, thin_component_count=THIN_COMPONENT_COUNT
+    )
 
 
 def write_dashboard_artifacts(
@@ -76,6 +80,32 @@ def _json_pretty(value: Any) -> str:
     if hasattr(value, "model_dump"):
         value = value.model_dump(mode="json")
     return json.dumps(value, indent=2, sort_keys=True)
+
+
+#: Fewer than this many scored components and the composite is thin enough that the
+#: grade is not comparable with a full-formula one without saying so loudly.
+THIN_COMPONENT_COUNT: int = 3
+
+
+def _component_count(row: Any) -> str:
+    """`"4/5"` - how many components the composite behind this grade was built from.
+
+    Unsourceable components are dropped and the remaining weights renormalised, so the
+    composite is a different quantity per row. The denominator is the full component
+    set, recovered from the row itself (`missing_components` is its complement).
+    Returns `""` for an unscored row, which has no composite to describe.
+    """
+    scored = list(getattr(row, "scored_components", None) or [])
+    if not scored:
+        return ""
+    total = len(scored) + len(getattr(row, "missing_components", None) or [])
+    return f"{len(scored)}/{total}"
+
+
+def _thin_evidence(row: Any) -> bool:
+    """True when the grade rests on fewer than `THIN_COMPONENT_COUNT` components."""
+    scored = list(getattr(row, "scored_components", None) or [])
+    return bool(scored) and len(scored) < THIN_COMPONENT_COUNT
 
 
 _TEMPLATE = """<!doctype html>
@@ -144,10 +174,25 @@ _TEMPLATE = """<!doctype html>
       background: var(--panel);
       border: 1px solid var(--line);
     }
-    .table-scroll table { min-width: 1120px; border: 0; }
+    .table-scroll table { min-width: 1160px; border: 0; }
     .ideas-table th, .ideas-table td { white-space: nowrap; }
     .ideas-table td:last-child { white-space: normal; min-width: 220px; }
     .grade-cell { font-weight: 700; }
+    .comp-count {
+      display: inline-block;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 0 4px;
+      margin-left: 4px;
+      font-weight: 400;
+      font-size: 12px;
+      color: var(--muted);
+      background: #fafafa;
+    }
+    .comp-count.thin { color: var(--warn); border-color: var(--warn); font-weight: 700; }
+    tr.thin-evidence td { background: #fdf5ea; }
+    tr.thin-evidence td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+    .legend { font-size: 12px; margin: 0 0 8px; }
     .empty {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -218,21 +263,28 @@ _TEMPLATE = """<!doctype html>
     <section id="trading-ideas">
       <h2>Trading Ideas</h2>
       {% if payload.trading_ideas %}
+      <p class="legend muted">Each grade carries the number of components the composite was
+      built from (<span class="comp-count">4/5</span>). Components that could not be sourced are
+      dropped and the remaining weights renormalised, so a
+      <span class="comp-count thin">2/5</span> grade is a different quantity from a 4/5 one and
+      the two are not directly comparable. Rows graded on fewer than
+      {{ thin_component_count }} components are highlighted.</p>
       <div class="table-scroll" role="region" aria-label="Trading ideas">
         <table class="ideas-table">
           <thead>
-            <tr><th>Ticker</th><th>Setup</th><th>Grade</th><th>Tier</th><th>Thesis</th><th>S_CTE</th><th>Status</th><th>Catalyst</th><th>Blocked Reason</th><th>Penalties</th><th>Headline</th></tr>
+            <tr><th>Ticker</th><th>Status</th><th>Setup</th><th>Direction</th><th>Grade</th><th>Thesis</th><th>S_CTE</th><th>Composite</th><th>Catalyst</th><th>Blocked Reason</th><th>Penalties</th><th>Headline</th></tr>
           </thead>
           <tbody>
           {% for row in payload.trading_ideas %}
-            <tr>
+            <tr{% if row|thin_evidence %} class="thin-evidence"{% endif %}>
               <td>{{ row.ticker }}</td>
+              <td>{{ row.status }}</td>
               <td>{{ row.setup_type|display }}</td>
-              <td class="grade-cell">{{ row.grade_letter|display }}{% if row.grade_score is not none %} <span class="muted">({{ row.grade_score|display }})</span>{% endif %}</td>
-              <td>{{ row.tier|display }}</td>
+              <td>{{ row.direction|display }}</td>
+              <td class="grade-cell">{{ row.grade_letter|display }}{% if row.grade_score is not none %} <span class="muted">({{ row.grade_score|display }})</span>{% endif %}{% if row|component_count %} <span class="comp-count{% if row|thin_evidence %} thin{% endif %}" title="{{ row|component_count }} components: composite built from {{ row.scored_components|join_or_unavailable }} with the remaining weights renormalised">{{ row|component_count }}</span>{% endif %}</td>
               <td>{{ row.thesis_band|display }}{% if row.thesis_probability is not none %} <span class="muted">({{ row.thesis_probability|display }})</span>{% endif %}</td>
               <td>{{ row.s_cte|score }}</td>
-              <td>{{ row.status }}</td>
+              <td>{% if row.scored_components %}{% if row.weight_profile %}{{ row.weight_profile }} · {% endif %}{{ row.scored_components|join_or_unavailable }}{% if row.missing_components %}<div class="muted">missing {{ row.missing_components|join_or_unavailable }}</div>{% endif %}{% else %}unavailable{% endif %}</td>
               <td>{% if row.catalyst %}{{ row.catalyst.name|display }}{% if row.catalyst.date %} · {{ row.catalyst.date }}{% endif %}{% if row.catalyst.status %} · {{ row.catalyst.status }}{% endif %}{% else %}unavailable{% endif %}</td>
               <td>{{ row.blocked_reason|display }}</td>
               <td>{{ row.grade_penalties|join_or_unavailable }}</td>

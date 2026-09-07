@@ -21,7 +21,8 @@ from briefing_app.dashboard.models import (
     TradingIdeaRow,
 )
 from briefing_app.models.gate import CandidateGateResult, GateReport
-from briefing_app.models.scoring import ScoringResult
+from briefing_app.models.scoring import ComponentScore, ScoringResult
+from briefing_app.options_math import OptionsStructureResult
 from briefing_app.strategy.models import (
     CandidateSetupResult,
     Setup,
@@ -30,6 +31,15 @@ from briefing_app.strategy.models import (
     SetupType,
     to_setup_evidence_rows,
 )
+
+_S_O_WEIGHTS: dict[str, float] = {
+    "skew": 0.30,
+    "put_call": 0.25,
+    "gamma": 0.20,
+    "liquidity": 0.10,
+    "iv_extreme": 0.10,
+    "short_borrow": 0.05,
+}
 
 
 def build_dashboard_payload(
@@ -41,6 +51,7 @@ def build_dashboard_payload(
     gate_report: GateReport | None = None,
     scores: Sequence[ScoringResult] = (),
     component_results: Sequence[ComponentResult] = (),
+    options_structures: Mapping[str, OptionsStructureResult] | None = None,
     setup_report: SetupReport | None = None,
     evidence_rows: Sequence[Mapping[str, Any]] = (),
     prior_scorecards: Sequence[Mapping[str, Any]] = (),
@@ -55,6 +66,10 @@ def build_dashboard_payload(
     """
     gates = _gate_by_ticker(gate_report)
     score_by_ticker = {score.ticker: score for score in scores}
+    options_by_ticker = {
+        ticker.strip().upper(): structure
+        for ticker, structure in (options_structures or {}).items()
+    }
     components_by_ticker: dict[str, list[ComponentResult]] = defaultdict(list)
     for component in component_results:
         components_by_ticker[component.ticker].append(component)
@@ -73,8 +88,8 @@ def build_dashboard_payload(
         set(gates)
         | set(score_by_ticker)
         | set(components_by_ticker)
+        | set(options_by_ticker)
         | set(setup_by_ticker)
-        | {row.ticker for row in ledger if row.ticker != "*"}
     )
     idea_tickers = sorted(
         set(score_by_ticker)
@@ -116,6 +131,7 @@ def build_dashboard_payload(
                 gate=gates.get(ticker),
                 score=score_by_ticker.get(ticker),
                 components=components_by_ticker.get(ticker, []),
+                option_structure=options_by_ticker.get(ticker),
                 setup_result=setup_by_ticker.get(ticker),
                 evidence=evidence_by_ticker.get(ticker, []),
                 data_mode=data_mode,
@@ -315,6 +331,9 @@ def _trading_ideas(
             TradingIdeaRow(
                 ticker=ticker,
                 setup_type=setup.setup_type.value if setup is not None else None,
+                # The direction `compute_grade` branched on, published so a reader can
+                # re-derive `alignment` for bands that do not imply a direction.
+                direction=setup.direction.value if setup is not None else None,
                 grade_letter=grade.letter if grade is not None else None,
                 grade_score=grade.score if grade is not None else None,
                 thesis_probability=(
@@ -326,6 +345,9 @@ def _trading_ideas(
                     if setup is not None
                     else (score.s_cte if score is not None else None)
                 ),
+                weight_profile=score.weight_profile if score is not None else None,
+                scored_components=score.available_components if score is not None else [],
+                missing_components=score.missing_components if score is not None else [],
                 tier=_idea_tier(score=score, setup_result=setup_result, setup=setup),
                 status=status,
                 catalyst=_catalyst_dict(
@@ -466,8 +488,34 @@ def _idea_headline(*, ticker: str, setup: Setup | None, status: str) -> str:
     return f"{ticker} no setup"
 
 
-def _idea_sort_key(row: TradingIdeaRow) -> tuple[bool, float, str]:
-    return (row.grade_score is None, -(row.grade_score or 0.0), row.ticker)
+def _idea_sort_key(row: TradingIdeaRow) -> tuple[int, int, str, bool, float, str]:
+    return (
+        _status_sort_rank(row.status),
+        _component_set_rank(row),
+        _component_set_key(row),
+        row.grade_score is None,
+        -(row.grade_score or 0.0),
+        row.ticker,
+    )
+
+
+def _status_sort_rank(status: str) -> int:
+    return {
+        "TRADEABLE": 0,
+        "WATCHLIST": 1,
+        "BLOCKED": 2,
+        "UNSCORED": 3,
+    }.get(status, 4)
+
+
+def _component_set_rank(row: TradingIdeaRow) -> int:
+    if not row.scored_components:
+        return 2
+    return 1 if row.missing_components else 0
+
+
+def _component_set_key(row: TradingIdeaRow) -> str:
+    return f"{row.weight_profile or ''}:{','.join(row.scored_components)}"
 
 
 def _dedupe_non_empty(values: Sequence[str | None]) -> list[str]:
@@ -487,6 +535,7 @@ def _ticker_section(
     gate: CandidateGateResult | None,
     score: ScoringResult | None,
     components: Sequence[ComponentResult],
+    option_structure: OptionsStructureResult | None,
     setup_result: CandidateSetupResult | None,
     evidence: Sequence[EvidenceLedgerRow],
     data_mode: str,
@@ -495,10 +544,12 @@ def _ticker_section(
         ticker=ticker,
         gate=_gate_summary(gate) if gate is not None else None,
         score=score.disclosure() if score is not None else None,
-        components=[
-            _component_summary(component, data_mode=data_mode)
-            for component in components
-        ],
+        components=_component_summaries(
+            score=score,
+            components=components,
+            option_structure=option_structure,
+            data_mode=data_mode,
+        ),
         setups=[setup.to_dict() for setup in setup_result.setups] if setup_result else [],
         setup_rejections=[
             {
@@ -532,6 +583,31 @@ def _gate_summary(result: CandidateGateResult) -> dict[str, Any]:
     }
 
 
+def _component_summaries(
+    *,
+    score: ScoringResult | None,
+    components: Sequence[ComponentResult],
+    option_structure: OptionsStructureResult | None,
+    data_mode: str,
+) -> list[dict[str, Any]]:
+    summaries = [
+        _component_summary(component, data_mode=data_mode)
+        for component in components
+    ]
+    present = {component.component for component in components}
+    if option_structure is not None and "S_O" not in present:
+        component_score = score.component("S_O") if score is not None else None
+        summaries.append(
+            _options_component_summary(
+                option_structure,
+                component_score=component_score,
+                score=score,
+                data_mode=data_mode,
+            )
+        )
+    return summaries
+
+
 def _component_summary(result: ComponentResult, *, data_mode: str) -> dict[str, Any]:
     summary = result.to_dict()
     legs_defined = len(result.sub_scores)
@@ -558,6 +634,188 @@ def _component_summary(result: ComponentResult, *, data_mode: str) -> dict[str, 
         )
     summary["source_rows"] = list(result.source_rows)
     return summary
+
+
+def _options_component_summary(
+    result: OptionsStructureResult,
+    *,
+    component_score: ComponentScore | None,
+    score: ScoringResult | None,
+    data_mode: str,
+) -> dict[str, Any]:
+    weight_used = _options_weights_used(result.sub_scores)
+    sub_scores = [
+        _options_sub_score_summary(
+            result,
+            name=name,
+            weight=weight,
+            weight_used=weight_used.get(name, 0.0),
+        )
+        for name, weight in _S_O_WEIGHTS.items()
+    ]
+    absent_legs = [
+        {"name": sub_score["name"], "reason": sub_score["na_reason"]}
+        for sub_score in sub_scores
+        if sub_score["score"] is None
+    ]
+    diagnostics = list(result.diagnostics)
+    diagnostics.extend(item["reason"] for item in absent_legs)
+    legs_scored = sum(
+        1
+        for sub_score in sub_scores
+        if sub_score["score"] is not None and sub_score["weight_used"] > 0.0
+    )
+    summary = {
+        "component": "S_O",
+        "ticker": result.ticker,
+        "as_of": result.as_of.isoformat(),
+        "geography": score.geography.value if score is not None else None,
+        "weight_profile": score.weight_profile if score is not None else None,
+        "available": result.available,
+        "score": component_score.score if component_score is not None else result.score,
+        "validation_status": (
+            component_score.validation_status
+            if component_score is not None
+            else ("verified" if result.available else "unavailable")
+        ),
+        "source_quality": (
+            component_score.source_quality
+            if component_score is not None
+            else ("primary" if result.available else "none")
+        ),
+        "na_reason": (
+            component_score.missing_reason
+            if component_score is not None and component_score.score is None
+            else result.na_reason
+        ),
+        "sub_scores": sub_scores,
+        "diagnostics": diagnostics,
+        "eu_substitutes": [],
+        "source_row_count": len(result.evidence_rows),
+        "legs_defined": len(sub_scores),
+        "legs_scored": legs_scored,
+        "legs_summary": f"{legs_scored} of {len(sub_scores)} legs",
+        "absent_legs": absent_legs,
+        "source_rows": [],
+    }
+    if data_mode == "fixture":
+        summary["leg_count_note"] = (
+            "fixture leg counts describe the fixture, not live sourcing"
+        )
+    return summary
+
+
+def _options_sub_score_summary(
+    result: OptionsStructureResult,
+    *,
+    name: str,
+    weight: float,
+    weight_used: float,
+) -> dict[str, Any]:
+    score = result.sub_scores.get(name)
+    return {
+        "name": name,
+        "score": score,
+        "weight": weight,
+        "weight_used": weight_used,
+        "max_weight": None,
+        "available": score is not None,
+        "na_reason": None if score is not None else _options_absent_reason(result, name),
+        "detail": _options_sub_score_detail(result, name),
+        "source": "computed from option chain" if score is not None else None,
+        "as_of": result.as_of.date().isoformat(),
+        "sample_size": _options_sub_score_sample_size(result, name),
+        "inputs": _options_sub_score_inputs(result, name),
+    }
+
+
+def _options_weights_used(sub_scores: Mapping[str, float]) -> dict[str, float]:
+    available = [name for name in _S_O_WEIGHTS if name in sub_scores]
+    total = sum(_S_O_WEIGHTS[name] for name in available)
+    if total <= 0:
+        return {name: 0.0 for name in _S_O_WEIGHTS}
+    return {
+        name: (_S_O_WEIGHTS[name] / total if name in sub_scores else 0.0)
+        for name in _S_O_WEIGHTS
+    }
+
+
+def _options_absent_reason(result: OptionsStructureResult, name: str) -> str:
+    if not result.available:
+        return result.na_reason or "no verified per-strike option chain supplied"
+    if name == "skew":
+        return "25-delta risk reversal unavailable for the selected expiry"
+    if name == "put_call":
+        return "put/call volume and open-interest readings unavailable for the selected expiry"
+    if name == "gamma":
+        return "dealer gamma unavailable: no usable gamma/open-interest rows for the selected expiry"
+    if name == "liquidity":
+        return "option-chain liquidity unavailable"
+    if name == "iv_extreme":
+        return "iv_extreme unavailable: self-built IV baseline is unavailable or still warming up"
+    if name == "short_borrow":
+        if result.short_borrow is not None and result.short_borrow.diagnostics:
+            return "; ".join(result.short_borrow.diagnostics)
+        return "short_borrow unavailable: no short-volume, short-interest, or borrow snapshot supplied"
+    return "unavailable"
+
+
+def _options_sub_score_detail(result: OptionsStructureResult, name: str) -> str | None:
+    if name == "skew" and result.risk_reversal_25d is not None:
+        return f"25-delta risk reversal {result.risk_reversal_25d.rr_25d:+.4f}"
+    if name == "put_call" and result.put_call is not None:
+        return "put/call volume and open-interest ratios"
+    if name == "gamma" and result.gamma_by_strike:
+        return f"{len(result.gamma_by_strike)} gamma strike rows"
+    if name == "liquidity" and name in result.sub_scores:
+        return "strike, expiry, open-interest and volume breadth"
+    if name == "iv_extreme" and result.iv_rank is not None:
+        return f"IV rank {result.iv_rank:.1f}"
+    if name == "short_borrow" and result.short_borrow is not None:
+        return ", ".join(result.short_borrow.inputs_used) or None
+    return None
+
+
+def _options_sub_score_sample_size(result: OptionsStructureResult, name: str) -> int:
+    if name == "gamma":
+        return len(result.gamma_by_strike)
+    if name == "short_borrow" and result.short_borrow is not None:
+        return len(result.short_borrow.inputs_used)
+    if name == "put_call" and result.put_call is not None:
+        return sum(
+            1
+            for value in (
+                result.put_call.volume_ratio,
+                result.put_call.open_interest_ratio,
+                result.put_call.volume_percentile,
+                result.put_call.open_interest_percentile,
+            )
+            if value is not None
+        )
+    return 1 if name in result.sub_scores else 0
+
+
+def _options_sub_score_inputs(result: OptionsStructureResult, name: str) -> dict[str, Any]:
+    if name == "skew" and result.risk_reversal_25d is not None:
+        return {"rr_25d": result.risk_reversal_25d.rr_25d}
+    if name == "put_call" and result.put_call is not None:
+        return {
+            "volume_ratio": result.put_call.volume_ratio,
+            "open_interest_ratio": result.put_call.open_interest_ratio,
+            "volume_percentile": result.put_call.volume_percentile,
+            "open_interest_percentile": result.put_call.open_interest_percentile,
+        }
+    if name == "gamma":
+        return {"strike_rows": len(result.gamma_by_strike)}
+    if name == "iv_extreme":
+        return {"iv_rank": result.iv_rank}
+    if name == "short_borrow" and result.short_borrow is not None:
+        return {
+            "verified": result.short_borrow.verified,
+            "inputs_used": list(result.short_borrow.inputs_used),
+            "squeeze_risk_score": result.short_borrow.squeeze_risk_score,
+        }
+    return {}
 
 
 def _absent_leg_reason(

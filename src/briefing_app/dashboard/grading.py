@@ -28,6 +28,42 @@ NO_SCENARIO_TABLE = "NO_SCENARIO_TABLE"
 NO_THESIS_PROBABILITY = "NO_THESIS_PROBABILITY"
 NO_S_CTE = "NO_S_CTE"
 
+#: |S_CTE| at which a directional setup is treated as fully convicted.
+#:
+#: NEUTRAL_BAND is the threshold at which a signal *stops being neutral*: it marks the
+#: point of *minimum* directional conviction, not maximum. Using it as the denominator
+#: of the directional branch was a category error -- it saturated alignment at
+#: |S_CTE| >= 0.15, so with the 0.80 directional alignment weight every row past the
+#: band edge scored >= 80 raw whatever its probability, and strong directional ideas
+#: became indistinguishable from merely non-neutral ones.
+#:
+#: 0.35 is chosen from observed live data: |S_CTE| tops out at 0.317 on real runs, so
+#: 0.35 is the *smallest* denominator that leaves no live row saturating. Smaller was
+#: tested and rejected -- 0.25 and 0.30 both still pin the strongest row at alignment
+#: 1.0. Larger was tested and rejected too: the denominator only moves the top of the
+#: directional range, and every value depresses the tail, so the smallest non-saturating
+#: choice is the one that costs the weak rows least.
+#:
+#: This constant cannot fix the real asymmetry, and is not expected to. Directional raw
+#: is `10 + 80 * alignment` because P(above spot) is pinned near 0.50 by construction and
+#: carries only 0.20 weight, while a neutral row draws 30-52 points from a P that varies
+#: 0.50-0.86. That 20-42 point head start is structural.
+#:
+#: An earlier version of this note proposed fixing it with "probability of reaching the
+#: setup's target". **That is disproved -- do not attempt it**
+#: (`docs/alternatives/directional-probability.md`, 2026-09-06). No target exists anywhere
+#: in `strategy/`, and every buildable alternative was measured and rejected: a
+#: distribution centred on spot cannot express direction, so no probability the scenario
+#: table can produce carries directional information. Directional P was measured at spread
+#: 0.049 across two runs, and *exactly* 0.5000 on every `measured_sigma` row.
+#:
+#: Two decisions came out of that search and are filed rather than applied, both in
+#: `HANDOFF.md`: setting `directional_probability_weight` to 0.0 so alignment carries the
+#: branch alone, and the larger finding that the real defect is on the *neutral* side --
+#: a neutral row is paid `0.60 * 0.683 = 41` points for the definition of the band it is
+#: measured over, which is a tautology, not evidence.
+DIRECTIONAL_FULL_CONVICTION: float = 0.35
+
 _BELOW_ROWS = ("below 2 sigma", "1 to 2 sigma down")
 _WITHIN_ROWS = ("within 1 sigma",)
 _ABOVE_ROWS = ("1 to 2 sigma up", "above 2 sigma")
@@ -74,6 +110,8 @@ class GradeResult:
     raw_score: float | None
     penalty_total: float
     tier_ceiling: float | None
+    probability_weight: float | None
+    alignment_weight: float | None
     reasons: list[str]
 
 
@@ -95,16 +133,37 @@ def thesis_band(setup: SetupLike) -> tuple[str, float | None]:
 def alignment(s_cte: float, direction: Direction | str) -> float:
     """Return the S_CTE alignment contribution for the setup direction.
 
-    The strategy engine defines neutral setups as `abs(S_CTE) < NEUTRAL_BAND`, so a
-    neutral setup gets full alignment only inside that established band.
+    Both branches return a unit-interval support score, but each is measured against
+    the reference point that is meaningful for its own thesis:
+
+    * A directional setup scores how far its S_CTE has travelled from zero towards
+      ``DIRECTIONAL_FULL_CONVICTION``, and 0.0 when the S_CTE sign contradicts the
+      direction. Full conviction is the ceiling, so alignment keeps discriminating
+      between a barely-non-neutral row and a strongly supported one.
+    * A neutral setup scores the distance it still has left before ``NEUTRAL_BAND``,
+      which for a neutral thesis genuinely is the point where support reaches zero:
+      past the band edge the row has stopped being neutral. That branch is unchanged.
+
+    Both branches must reach the same floor and ceiling. Scoring the directional branch
+    as the raw S_CTE magnitude capped its contribution at roughly a third of the
+    alignment weight while the neutral branch could take all of it, which sorted every
+    neutral row above every directional one regardless of how strong the directional
+    evidence was. Dividing it by ``NEUTRAL_BAND`` instead over-corrected: it saturated
+    at the neutral edge, the point of *minimum* directional conviction.
     """
 
     direction = _coerce_direction(direction)
     if direction is Direction.LONG:
-        return abs(s_cte) if s_cte > 0.0 else 0.0
+        return _conviction_units(s_cte) if s_cte > 0.0 else 0.0
     if direction is Direction.SHORT:
-        return abs(s_cte) if s_cte < 0.0 else 0.0
-    return 1.0 if abs(s_cte) < NEUTRAL_BAND else 0.0
+        return _conviction_units(s_cte) if s_cte < 0.0 else 0.0
+    return _bounded_probability(1.0 - (abs(s_cte) / NEUTRAL_BAND))
+
+
+def _conviction_units(s_cte: float) -> float:
+    """Return |S_CTE| as a fraction of full directional conviction, capped at one."""
+
+    return min(1.0, abs(s_cte) / DIRECTIONAL_FULL_CONVICTION)
 
 
 def letter_for_score(score: float) -> str:
@@ -142,6 +201,8 @@ def compute_grade(
             raw_score=None,
             penalty_total=0.0,
             tier_ceiling=None,
+            probability_weight=None,
+            alignment_weight=None,
             reasons=[reason],
         )
 
@@ -157,15 +218,18 @@ def compute_grade(
             raw_score=None,
             penalty_total=0.0,
             tier_ceiling=None,
+            probability_weight=None,
+            alignment_weight=None,
             reasons=[NO_S_CTE],
         )
 
     _validate_unit_interval("confidence_multiplier", confidence_multiplier)
     tier = _coerce_tier(setup.tier)
     alignment_score = alignment(s_cte, setup.direction)
+    probability_weight, alignment_weight = _effective_weights(grading_settings, thesis)
     raw_score = 100.0 * (
-        grading_settings.probability_weight * thesis.probability
-        + grading_settings.alignment_weight * alignment_score
+        probability_weight * thesis.probability
+        + alignment_weight * alignment_score
     )
 
     penalties: list[str] = []
@@ -195,8 +259,20 @@ def compute_grade(
         raw_score=round(raw_score, 2),
         penalty_total=round(penalty_total, 2),
         tier_ceiling=tier_ceiling,
+        probability_weight=probability_weight,
+        alignment_weight=alignment_weight,
         reasons=[],
     )
+
+
+def _effective_weights(
+    settings: ReportGradingSettings,
+    thesis: _ThesisSelection,
+) -> tuple[float, float]:
+    if thesis.label in (ABOVE_SPOT, BELOW_SPOT):
+        probability_weight = settings.directional_probability_weight
+        return probability_weight, 1.0 - probability_weight
+    return settings.probability_weight, settings.alignment_weight
 
 
 def _select_thesis_band(setup: SetupLike) -> _ThesisSelection:

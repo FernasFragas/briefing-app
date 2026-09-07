@@ -148,17 +148,31 @@ class TradingIdeaRow(BaseModel):
 
     `grade_letter` is `None` for an unscored name: a ticker that never produced a
     `ScoringResult` is listed so its absence is visible, not graded on partial data.
+    `scored_components` names the component set behind the composite so rows scored on
+    different denominators are visible in the report.
+
+    `direction` is the direction the grade was actually computed against. It is
+    published because `alignment()` branches on direction, not on thesis band, and the
+    band only implies the direction for `above spot`, `below spot` and `within 1 sigma`.
+    A `beyond +/-1 sigma` row does not: a skew structure carries a real LONG or SHORT
+    direction while publishing the same band as a NEUTRAL straddle, so without this
+    field two rows with identical published fields grade differently and neither is
+    reproducible.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     ticker: str
     setup_type: str | None = None
+    direction: str | None = None
     grade_letter: str | None = None
     grade_score: float | None = None
     thesis_probability: float | None = None
     thesis_band: str | None = None
     s_cte: float | None = None
+    weight_profile: str | None = None
+    scored_components: list[str] = Field(default_factory=list)
+    missing_components: list[str] = Field(default_factory=list)
     tier: str | None = None
     status: str
     catalyst: dict[str, Any] | None = None
