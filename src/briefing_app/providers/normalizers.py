@@ -2662,8 +2662,11 @@ def parse_datetime(value: Any) -> datetime:
         return datetime.strptime(text, "%Y%m%dT%H%M%S").replace(tzinfo=UTC)
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
-    parsed = datetime.fromisoformat(text)
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    try:
+        parsed = datetime.fromisoformat(text)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise NormalizationError(f"unparseable datetime {text!r}: {exc}") from exc
 
 
 def parse_date(value: Any) -> date:

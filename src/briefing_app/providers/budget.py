@@ -51,9 +51,16 @@ DEFAULT_BUDGETS.update(
         # "spreading out your requests" notice, and the 26th call of a day returns a
         # daily-limit notice. A paid plan lifts the daily count (see `plan_overrides`).
         "alpha_vantage": ProviderBudgetPolicy(daily_requests=25, min_interval_seconds=1.2),
-        # FMP's free plan is 250 requests/day and answers a burst with HTTP 402, which
-        # is indistinguishable from a plan gate at the HTTP layer. Pacing keeps a real
-        # plan refusal legible.
+        # FMP's free plan is documented as 250 requests/day and answers a burst with
+        # HTTP 402, which is indistinguishable from a plan gate at the HTTP layer. Pacing
+        # keeps a real plan refusal legible.
+        #
+        # 250 is FMP's published figure, and it is not what FMP enforced on 2026-09-03:
+        # the day closed at 208/250 by this counter while the provider was already
+        # answering HTTP 429 `Limit Reach` for 15 of 23 tickers, having served 240/250 the
+        # day before without a single refusal. So the number is kept as documented and the
+        # real ceiling is *learned from the refusal* instead - see `note_quota_exhausted`.
+        # Guessing a lower constant would trade one wrong number for another.
         "fmp": ProviderBudgetPolicy(daily_requests=250, min_interval_seconds=0.35),
         # Finnhub's free tier is a rate limit, not a daily allowance: 60 requests/minute
         # with a separate 30/second ceiling in its terms, and no published daily cap.
@@ -96,6 +103,10 @@ def is_plan_gate_notice(notes) -> bool:
     if is_quota_notice(blob):
         return False
     return classify_plan_gate(blob) == GATE_ENDPOINT
+
+
+#: Key under which a day's counter file records that the provider itself said stop.
+QUOTA_EXHAUSTED = "quota_exhausted"
 
 
 class BudgetExhausted(RuntimeError):
@@ -197,6 +208,64 @@ class RequestBudget:
         }
         target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
+    def note_quota_exhausted(
+        self,
+        provider: str,
+        endpoint: str,
+        note: str = "",
+        *,
+        plan: str = "free",
+    ) -> bool:
+        """Learn today's real ceiling from the provider's own refusal.
+
+        A configured `daily_requests` is a documented figure, and a documented figure is
+        not a promise. On 2026-09-03 FMP refused at a counter reading of roughly 140 of a
+        configured 250, and because nothing recorded that refusal the pipeline asked 57
+        more times and was refused 57 more times - then fell back to Alpha Vantage, spent
+        its 25/day, and cost four tickers the vendor-scored news the fallback existed to
+        protect. One provider's throughput limit disabled two others' legs.
+
+        So the refusal is written into the day's counter: whatever the configured ceiling
+        said, *this* is where the provider actually stopped. The record is day-scoped, and
+        deliberately not promoted to a permanent policy the way `note_plan_gated` is - a
+        quota clears at midnight, and a rate blip must not lower tomorrow's ceiling. The
+        cost of that choice is one wasted request per day to rediscover the limit, against
+        57 saved on the day it was observed.
+
+        Only providers with a declared daily allowance learn this way. Finnhub and FRED
+        declare `daily_requests=None` because their limits are per-minute rates, and
+        retiring a rate-limited provider for a whole day would turn a one-minute pause
+        into an outage. Those are paced, never retired.
+
+        Returns True when the refusal was recorded.
+        """
+
+        policy = self.policy_for(provider, plan=plan)
+        if policy.unlimited:
+            return False
+
+        day = self._now().date()
+        state = self._read(provider, day)
+        if isinstance(state.get(QUOTA_EXHAUSTED), dict):
+            return False
+
+        count = int(state.get("count", 0))
+        state[QUOTA_EXHAUSTED] = {
+            "at": self._now().isoformat(),
+            "endpoint": endpoint,
+            "observed_count": count,
+            "configured_limit": policy.daily_requests,
+            "note": note,
+        }
+        self._write(provider, day, state)
+        return True
+
+    def quota_exhausted(self, provider: str, *, day: date | None = None) -> dict | None:
+        """The provider's own stop signal for a day, if one was observed."""
+
+        recorded = self._read(provider, day or self._now().date()).get(QUOTA_EXHAUSTED)
+        return recorded if isinstance(recorded, dict) else None
+
     def spent(self, provider: str, *, day: date | None = None) -> int:
         return int(self._read(provider, day or self._now().date()).get("count", 0))
 
@@ -217,8 +286,15 @@ class RequestBudget:
         state = self._read(provider, day)
         count = int(state.get("count", 0))
 
-        if not policy.unlimited and count >= policy.daily_requests:
-            raise BudgetExhausted(provider, endpoint, count, policy.daily_requests)
+        if not policy.unlimited:
+            learned = state.get(QUOTA_EXHAUSTED)
+            if isinstance(learned, dict):
+                # The provider already said stop today. Its answer outranks the
+                # configured ceiling, which is the whole point of recording it.
+                observed = int(learned.get("observed_count", count) or count)
+                raise BudgetExhausted(provider, endpoint, count, observed)
+            if count >= policy.daily_requests:
+                raise BudgetExhausted(provider, endpoint, count, policy.daily_requests)
 
         if policy.min_interval_seconds > 0:
             last = _parse_datetime(state.get("last_request_at"))
@@ -231,17 +307,16 @@ class RequestBudget:
         endpoint_counts = _endpoint_counts(state)
         endpoint_counts[endpoint] = endpoint_counts.get(endpoint, 0) + 1
 
-        self._write(
-            provider,
-            day,
-            {
-                "count": count + 1,
-                "endpoints": endpoint_counts,
-                "last_request_at": now.isoformat(),
-                "daily_requests": policy.daily_requests,
-                "last_endpoint": endpoint,
-            },
-        )
+        written = {
+            "count": count + 1,
+            "endpoints": endpoint_counts,
+            "last_request_at": now.isoformat(),
+            "daily_requests": policy.daily_requests,
+            "last_endpoint": endpoint,
+        }
+        if isinstance(state.get(QUOTA_EXHAUSTED), dict):
+            written[QUOTA_EXHAUSTED] = state[QUOTA_EXHAUSTED]
+        self._write(provider, day, written)
 
     def _read(self, provider: str, day: date) -> dict:
         target = self.path(provider, day)

@@ -6,6 +6,9 @@ from urllib.parse import urlencode
 from briefing_app.providers.base import BaseProviderClient, ProviderResponse, require_credential
 
 
+NEWS_SENTIMENT_LIMIT = 1000
+
+
 class AlphaVantageClient(BaseProviderClient):
     """Alpha Vantage, treated as a metered source.
 
@@ -120,13 +123,20 @@ class AlphaVantageClient(BaseProviderClient):
             cache_only=cache_only,
         )
 
-    def fetch_news_sentiment(self, ticker: str, *, run_date: date, cache_only: bool = False) -> ProviderResponse:
+    def fetch_news_sentiment(
+        self,
+        ticker: str,
+        *,
+        run_date: date,
+        limit: int = NEWS_SENTIMENT_LIMIT,
+        cache_only: bool = False,
+    ) -> ProviderResponse:
         clean_ticker = ticker.strip().upper()
         return self.fetch_function(
             "NEWS_SENTIMENT",
             target=clean_ticker,
             run_date=run_date,
-            params={"tickers": clean_ticker},
+            params={"tickers": clean_ticker, "limit": str(limit)},
             cache_endpoint="news_sentiment",
             required_json_paths=("feed",),
             cache_only=cache_only,
