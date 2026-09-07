@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, Protocol, Sequence
 import json
 import os
+import re
 import uuid
 
 from briefing_app.components import (
@@ -177,6 +178,16 @@ FINRA_LOOKBACK_SESSIONS = 5
 #: filings without their contents, and an active large-cap files more in 90 days than the
 #: insider component can use.
 EDGAR_FORM4_MAX_FILINGS = 20
+
+#: How many ApeWisdom pages the retail feed reads per run.
+#:
+#: PC2, 2026-09-03. One page is 100 tickers ranked by attention, and the feed carried 863
+#: over 9 pages that day - so eight universe names were recorded as having "no retail or
+#: social momentum reading supplied" when six of them were simply on page 2 or 3. Nine
+#: covers the whole feed today with room to spare; the loop stops early on the first page
+#: that answers nothing, so a shorter feed costs one wasted request, not nine. The source
+#: is keyless and declares no daily allowance, so the extra pages cost no quota.
+RETAIL_MOMENTUM_PAGES = 9
 
 #: Stored sessions required before a self-built series is ranked against.
 #:
@@ -439,7 +450,9 @@ def run_pipeline(
     data_root = Path(data_dir or os.getenv("BRIEFING_DATA_DIR") or "data")
     output_root = Path(output_dir or os.getenv("BRIEFING_OUTPUT_DIR") or "output")
     raw_cache = RawCache(data_root)
-    repo = repository or _repository_from_env()
+    repo = repository if repository is not None else (
+        _repository_from_env(data_root) if persist else None
+    )
     source = data_source or _data_source_for_mode(data_mode)
     effective_data_mode = getattr(source, "data_mode", data_mode)
     output = PipelineRunOutput(
@@ -617,6 +630,9 @@ def run_pipeline(
             gate_report=gate_report,
             scores=score_results,
             component_results=component_results,
+            options_structures={
+                ticker: data.option_structure for ticker, data in ticker_data.items()
+            },
             setup_report=setup_report,
             evidence_rows=dashboard_evidence,
             prior_scorecards=prior_scorecards,
@@ -901,10 +917,15 @@ class FixtureDataSource:
                 ),
             ],
         )
+        # Same rule as the live path and for the same reason as the `S_F` note below: a
+        # fixture that hands SPY analyst ratings and Form 4s rehearses components the live
+        # run declares n/a, so the fixture would validate behaviour that never ships.
+        issuer_backed = not candidate.is_index_or_etf
         sentiment = build_sentiment_component(
             ticker=ticker,
             geography=candidate.geography,
             run_date=run_date,
+            issuer_backed=issuer_backed,
             news=news_batch,
             analyst_signals=[
                 AnalystSignal(
@@ -967,6 +988,7 @@ class FixtureDataSource:
             source="fixture raw cache",
             endpoint_or_file=str(insider_path),
             run_id=run_id,
+            issuer_backed=issuer_backed,
         )
 
         # No ownership fixture: S_F is declared permanently n/a, so a fixture run that
@@ -1351,14 +1373,23 @@ class LiveDataSource:
             raw_paths=raw_paths,
             issues=issues,
         )
-        analyst_signals = self._analyst_signals(
-            ticker,
-            config=config,
-            run_date=run_date,
-            raw_cache=raw_cache,
-            responses=responses,
-            raw_paths=raw_paths,
-            issues=issues,
+        # PC3, 2026-09-03. An index has no issuer, so nothing publishes ratings or
+        # targets for it. Asking anyway cost three providers a request per ETF per run to
+        # be told so - and on 2026-09-03 those requests were spent from an FMP allowance
+        # that ran out before 15 issuers had been covered.
+        issuer_backed = not candidate.is_index_or_etf
+        analyst_signals = (
+            self._analyst_signals(
+                ticker,
+                config=config,
+                run_date=run_date,
+                raw_cache=raw_cache,
+                responses=responses,
+                raw_paths=raw_paths,
+                issues=issues,
+            )
+            if issuer_backed
+            else []
         )
         political_trades, political_responses, political_issues = self._political_trades_for_run(
             config=config,
@@ -1376,14 +1407,18 @@ class LiveDataSource:
         for response in retail_responses:
             _record_response(response, responses, raw_paths)
         issues.extend(retail_issues)
-        insiders = self._insider_transactions(
-            ticker,
-            config=config,
-            run_date=run_date,
-            raw_cache=raw_cache,
-            responses=responses,
-            raw_paths=raw_paths,
-            issues=issues,
+        insiders = (
+            self._insider_transactions(
+                ticker,
+                config=config,
+                run_date=run_date,
+                raw_cache=raw_cache,
+                responses=responses,
+                raw_paths=raw_paths,
+                issues=issues,
+            )
+            if issuer_backed
+            else []
         )
         option_structure = build_options_structure(
             ticker=ticker,
@@ -1433,6 +1468,7 @@ class LiveDataSource:
             run_date=run_date,
             news=news,
             analyst_signals=analyst_signals,
+            issuer_backed=issuer_backed,
             spot=chain.spot,
             retail_momentum=retail_by_ticker.get(ticker),
             political_flow=political_trades,
@@ -1453,6 +1489,7 @@ class LiveDataSource:
             window_days=config.components.insider_window_days,
             endpoint_or_file=_endpoint_group(responses, {"insider_transactions", "insider_trades"}),
             run_id=run_id,
+            issuer_backed=issuer_backed,
         )
         institutional = _declared_unavailable_component(
             "S_F",
@@ -2004,7 +2041,7 @@ class LiveDataSource:
         issues: list[str],
     ) -> NewsSentimentBatch | None:
         last_batch: NewsSentimentBatch | None = None
-        for provider in _provider_order(config, "news"):
+        for provider in _news_provider_order(config, ticker):
             if provider == "alpha_vantage":
                 response = self._optional_response(
                     "Alpha Vantage news sentiment",
@@ -2163,24 +2200,44 @@ class LiveDataSource:
                 issues.append(_unsupported_provider_message(provider, "retail"))
                 continue
 
-            response = self._optional_response(
-                "ApeWisdom retail momentum",
-                lambda: self._apewisdom(raw_cache).fetch_all_stocks(
-                    run_date=run_date, cache_only=self.cache_only
-                ),
-                issues,
-            )
-            if response is None:
-                continue
-            responses.append(response)
-            try:
-                rows = normalize_apewisdom_retail_momentum(
-                    response.payload, as_of=run_date
+            # PC2, 2026-09-03. `retail_momentum` was n/a for COST, CRWV, DE, FDX, GM,
+            # JPM, LMT and XOM, and the ledger carried it as a coverage gap needing a
+            # second vendor. It was not: ApeWisdom answers `count: 863` over `pages: 9`
+            # and this call was reading page 1. Six of the eight were on pages 2 and 3 the
+            # same day. The fix is a loop, not a provider - so no source was adopted.
+            for page in range(1, RETAIL_MOMENTUM_PAGES + 1):
+                # Running off the end of the feed is how this loop is *supposed* to stop:
+                # `RETAIL_MOMENTUM_PAGES` is an upper bound, and the feed is shorter on
+                # some days. Only a failure on page 1 means the source is unreachable, so
+                # later pages report into a scratch list that is discarded. Without this,
+                # the 2026-09-06 run logged 18 `live_provider_issue` rows -- one per scored
+                # ticker -- for an empty page 9, which is not an issue at all.
+                page_issues = issues if page == 1 else []
+                response = self._optional_response(
+                    f"ApeWisdom retail momentum page {page}",
+                    lambda page=page: self._apewisdom(raw_cache).fetch_all_stocks(
+                        run_date=run_date, page=page, cache_only=self.cache_only
+                    ),
+                    page_issues,
                 )
-            except NormalizationError as exc:
-                issues.append(f"ApeWisdom retail momentum normalization failed: {exc}")
-                continue
-            snapshots = {row.ticker: row for row in rows}
+                if response is None:
+                    # A later page failing must not discard the pages that answered.
+                    break
+                responses.append(response)
+                try:
+                    rows = normalize_apewisdom_retail_momentum(
+                        response.payload, as_of=run_date
+                    )
+                except NormalizationError as exc:
+                    issues.append(
+                        f"ApeWisdom retail momentum page {page} normalization failed: {exc}"
+                    )
+                    break
+                if not rows:
+                    break
+                # Earlier pages rank higher, so an earlier row wins a duplicate.
+                for row in rows:
+                    snapshots.setdefault(row.ticker, row)
             if snapshots:
                 break
 
@@ -2859,10 +2916,12 @@ def _data_source_for_mode(data_mode: DataMode) -> PipelineDataSource:
     raise ValueError(f"unsupported pipeline data mode: {data_mode}")
 
 
-def _repository_from_env() -> StorageRepository | None:
-    if not os.getenv("DATABASE_URL"):
+def _repository_from_env(data_root: Path) -> StorageRepository | None:
+    if os.getenv("DATABASE_URL"):
+        return StorageRepository.from_env()
+    if os.getenv("BRIEFING_LOCAL_SQLITE", "1").strip().lower() in {"0", "false", "no"}:
         return None
-    return StorageRepository.from_env()
+    return StorageRepository.local_sqlite(data_root)
 
 
 def _final_status(output: PipelineRunOutput) -> str:
@@ -3029,24 +3088,35 @@ def _provider_issue_evidence(
     ticker: str,
     as_of: datetime,
 ) -> dict[str, Any]:
+    safe_issue = _redact_provider_text(issue)
     return _evidence_row(
         run_id=run_id,
         ticker=ticker,
         component="RAW",
         field_name="live_provider_issue",
-        field_value=issue,
+        field_value=safe_issue,
         source="live providers",
         as_of=as_of,
         endpoint_or_file="",
         validation_status=STATUS_UNAVAILABLE,
-        note=issue,
+        note=safe_issue,
     )
 
 
 def _provider_error_message(label: str, exc: ProviderDataError) -> str:
     notes = "; ".join(exc.notes)
     suffix = f": {notes}" if notes else ""
-    return f"{label} unavailable ({exc.status}){suffix}"
+    return _redact_provider_text(f"{label} unavailable ({exc.status}){suffix}")
+
+
+def _redact_provider_text(text: str) -> str:
+    text = re.sub(r"(apikey|api_key|token)=[^&\\s]+", r"\1=REDACTED", text)
+    return re.sub(
+        r"(API key as )([A-Za-z0-9_-]+)",
+        r"\1REDACTED",
+        text,
+        flags=re.IGNORECASE,
+    )
 
 
 def _record_response(
@@ -3159,6 +3229,21 @@ def _component_for_endpoint(endpoint: str) -> str:
 
 def _provider_order(config: AppConfig, name: str) -> tuple[str, ...]:
     return tuple(getattr(config.providers, name))
+
+
+def _news_provider_order(config: AppConfig, ticker: str) -> tuple[str, ...]:
+    order = list(_provider_order(config, "news"))
+    if "alpha_vantage" not in order or not _ticker_in_shortlist(
+        ticker, config.providers.news_alpha_vantage_shortlist
+    ):
+        return tuple(order)
+    order.remove("alpha_vantage")
+    return ("alpha_vantage", *order)
+
+
+def _ticker_in_shortlist(ticker: str, shortlist: Sequence[str]) -> bool:
+    clean = ticker.strip().upper()
+    return clean in {item.strip().upper() for item in shortlist if item.strip()}
 
 
 def _unsupported_provider_message(provider: str, leg: str) -> str:

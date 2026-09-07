@@ -31,6 +31,7 @@ from briefing_app.pipeline import (
     FixtureFabricationError,
     TickerData,
     _refuse_fabricated_legs,
+    _provider_issue_evidence,
     run_daily,
 )
 from briefing_app.providers.manual import load_eurex_manual_options_capture
@@ -73,6 +74,21 @@ def test_filtering_never_promotes_a_partial_chain_to_verified() -> None:
 
     assert filtered.contracts, "the liquid row should survive the filter"
     assert filtered.validation_status is ValidationStatus.PARTIAL
+
+
+def test_provider_issue_evidence_redacts_echoed_api_keys() -> None:
+    row = _provider_issue_evidence(
+        "Alpha Vantage unavailable (throttled): API key as SECRET123 and "
+        "https://example.test/query?apikey=SECRET123",
+        run_id=1,
+        ticker="NVDA",
+        as_of=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+    )
+
+    assert "SECRET123" not in row["field_value"]
+    assert "SECRET123" not in row["note"]
+    assert "API key as REDACTED" in row["field_value"]
+    assert "apikey=REDACTED" in row["field_value"]
 
 
 def test_filtering_preserves_a_verified_chain() -> None:

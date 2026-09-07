@@ -41,6 +41,7 @@ ProviderName = Literal[
     "fred",
     "finra",
     "sec_edgar",
+    "apewisdom",
     "fca",
     "eurex",
     "bundesanzeiger",
@@ -149,6 +150,7 @@ class ReportGradingSettings(BaseModel):
 
     probability_weight: float = Field(default=0.60, ge=0.0, le=1.0)
     alignment_weight: float = Field(default=0.40, ge=0.0, le=1.0)
+    directional_probability_weight: float = Field(default=0.20, ge=0.0, le=1.0)
     divergence_penalty: float = 10.0
     crowding_penalty_scale: float = 20.0
 
@@ -310,28 +312,45 @@ class ProvidersSettings(BaseModel):
         default_factory=lambda: ["cboe", "alpha_vantage"]
     )
     quotes: list[ProviderName] = Field(default_factory=lambda: ["alpha_vantage"])
+    #: FMP leads when it covers the symbol. Twelve Data backs up FMP's free-plan
+    #: symbol gates for the six verified US names; Alpha Vantage stays last because
+    #: price history is already covered twice over and the free key has 25 daily calls.
     prices: list[ProviderName] = Field(
+        default_factory=lambda: ["fmp", "twelve_data", "alpha_vantage"]
+    )
+    #: Finnhub leads the broad universe because it costs no Alpha Vantage budget.
+    #: Alpha Vantage returned more scored same-ticker articles in the N4 raised-limit
+    #: probe, so it is promoted only for a configured shortlist.
+    news: list[ProviderName] = Field(
+        default_factory=lambda: ["finnhub", "alpha_vantage", "fmp"]
+    )
+    #: Tickers that should spend Alpha Vantage NEWS_SENTIMENT before Finnhub. This is
+    #: the C allocation from Q6: AV's richer scored feed is reserved for a small
+    #: decision shortlist rather than the whole universe.
+    news_alpha_vantage_shortlist: list[str] = Field(default_factory=list)
+    earnings: list[ProviderName] = Field(
         default_factory=lambda: ["fmp", "alpha_vantage"]
     )
-    news: list[ProviderName] = Field(
-        default_factory=lambda: ["alpha_vantage", "fmp"]
-    )
-    earnings: list[ProviderName] = Field(
-        default_factory=lambda: ["alpha_vantage", "fmp"]
-    )
     macro: list[ProviderName] = Field(default_factory=lambda: ["fmp"])
-    analyst: list[ProviderName] = Field(default_factory=lambda: ["fmp"])
+    #: FMP first: `grades-consensus` returns analyst counts and a consensus price
+    #: target, and Finnhub's target endpoint is 403 on the free tier. Finnhub is the
+    #: fallback that ends this leg's sole-provider exposure for US names.
+    analyst: list[ProviderName] = Field(default_factory=lambda: ["fmp", "finnhub"])
     #: SEC EDGAR leads: Form 4 is the primary record, free and unmetered, while the two
     #: aggregators behind it are a spent key and a plan-gated endpoint.
     insider: list[ProviderName] = Field(
         default_factory=lambda: ["sec_edgar", "alpha_vantage", "fmp"]
     )
-    institutional: list[ProviderName] = Field(
-        default_factory=lambda: ["alpha_vantage", "fmp"]
-    )
-    put_call: list[ProviderName] = Field(default_factory=lambda: ["alpha_vantage"])
-    political: list[ProviderName] = Field(default_factory=list)
-    retail: list[ProviderName] = Field(default_factory=list)
+    #: Empty by design: `S_F` is declared permanently n/a (Q4), so no institutional
+    #: holdings are fetched and no request is spent on them. The clients and normalizers
+    #: stay wired and tested for the day the decision is revisited - see
+    #: `pipeline.DECLARED_UNSCORABLE_COMPONENTS`.
+    institutional: list[ProviderName] = Field(default_factory=list)
+    #: Put/call percentile baselines are built from persisted option snapshots; no
+    #: metered provider history is fetched by default.
+    put_call: list[ProviderName] = Field(default_factory=list)
+    political: list[ProviderName] = Field(default_factory=lambda: ["fmp"])
+    retail: list[ProviderName] = Field(default_factory=lambda: ["apewisdom"])
     #: FINRA's consolidated file is free, unmetered and needs no key, so it leads by
     #: default. It carries daily short *volume* only - see `docs/alternatives/pa1-borrow.md`.
     short_interest: list[ProviderName] = Field(default_factory=lambda: ["finra"])

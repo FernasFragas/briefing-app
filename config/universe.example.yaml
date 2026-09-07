@@ -275,7 +275,7 @@ candidates:
     venue: XETRA
     geography: EU
     currency: EUR
-    sector: Defence
+    sector: Defense
     direction: long
     expression_class: E
     horizon_days: 21
@@ -300,7 +300,7 @@ candidates:
     venue: BORSA_ITALIANA
     geography: EU
     currency: EUR
-    sector: Defence
+    sector: Defense
     direction: long
     expression_class: E
     horizon_days: 21

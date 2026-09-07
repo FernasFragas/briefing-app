@@ -38,7 +38,7 @@ sources:
     # second, and answers HTTP 200 with a rate-limit notice once either is crossed - a
     # body indistinguishable from a data failure by the time it reaches a component.
     # Only `symbol_search` is probed on every run; the rest are `probe_tier: deep`, so a
-    # routine preflight spends one request rather than thirteen of the day's twenty-five.
+    # routine preflight spends one request rather than twelve of the day's twenty-five.
     probe_delay_seconds: 1.2
     endpoints:
       - id: symbol_search
@@ -107,14 +107,17 @@ sources:
       - id: news_sentiment
         component: S_S
         method: GET
-        url_template: https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&apikey={api_key}
+        url_template: https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&limit=1000&apikey={api_key}
         cache_provider: alpha_vantage
         cache_endpoint: news_sentiment
         probe_enabled: true
         probe_tier: deep
         required_json_paths:
           - feed
-        note: Quota-sensitive; daily pipeline fetches after candidate gate.
+        note: >-
+          Quota-sensitive; daily pipeline fetches after candidate gate. Limit is set to
+          1000 explicitly so an entitlement probe measures the feed rather than Alpha
+          Vantage's default 50-row page.
       - id: earnings_calendar
         component: catalyst
         method: GET
@@ -160,20 +163,13 @@ sources:
         cache_endpoint: realtime_put_call_ratio
         probe_enabled: true
         probe_tier: deep
+        required: false
         required_json_paths:
           - put_call_ratio_full_chain
-        note: Level is meaningless alone; scored as a percentile of the ticker's own history.
-      - id: historical_put_call_ratio
-        component: S_O
-        method: GET
-        url_template: https://www.alphavantage.co/query?function=HISTORICAL_PUT_CALL_RATIO&symbol={ticker}&apikey={api_key}
-        cache_provider: alpha_vantage
-        cache_endpoint: historical_put_call_ratio
-        probe_enabled: true
-        probe_tier: deep
-        required_json_paths:
-          - put_call_ratio_full_chain
-        note: Supplies the baseline the put/call percentile is measured against.
+        note: >-
+          Optional only. The live S_O put/call level and baselines are computed from the
+          CBOE chain and persisted snapshots, so this AV endpoint must not consume the
+          required-provider slot.
       - id: historical_options
         component: S_O
         method: GET
@@ -200,6 +196,56 @@ sources:
         required_json_paths:
           - data
         note: One cache slot for every macro series; the function name is the cache target.
+
+  - id: finnhub
+    display_name: Finnhub
+    priority: primary_or_fallback
+    geography: [US]
+    source_type: http_json
+    components: [S_S]
+    entitlement: key_required
+    staleness_bound: daily
+    credential_env: FINNHUB_API_KEY
+    # Free tier is a rate limit rather than a daily allowance: 60 requests/minute, with a
+    # separate 30/second ceiling in the terms and no published daily cap. That is the
+    # point of the source - Alpha Vantage's 25/day could not serve a multi-ticker run.
+    # Free tier is also US-only: RHM.DE answered HTTP 403 on 2026-08-31 while US symbols
+    # returned 200, so the client refuses an exchange-suffixed symbol before requesting.
+    endpoints:
+      - id: company_news
+        component: S_S
+        method: GET
+        url_template: https://finnhub.io/api/v1/company-news?symbol={ticker}&from={from_date}&to={to_date}&token={api_key}
+        cache_provider: finnhub
+        cache_endpoint: company_news
+        cache_target_template: "{ticker}"
+        probe_enabled: true
+        probe_symbol: AAPL
+        probe_window_days: 7
+        required_json_paths:
+          - root
+        note: >-
+          Company news over a dated window. Verified 2026-08-31: HTTP 200, 95 rows. The
+          articles carry no sentiment field - /news-sentiment is 403 on this tier - so
+          tone is derived locally by providers/news_tone.py and the batch names it
+          "local tone" so no reader takes it for a vendor's scored feed.
+      - id: recommendation_trends
+        component: S_S
+        method: GET
+        url_template: https://finnhub.io/api/v1/stock/recommendation?symbol={ticker}&token={api_key}
+        cache_provider: finnhub
+        cache_endpoint: recommendation_trends
+        cache_target_template: "{ticker}"
+        probe_enabled: true
+        probe_symbol: AAPL
+        required_json_paths:
+          - root
+        note: >-
+          Analyst counts per bucket, one row per month. Verified 2026-08-31: HTTP 200,
+          4 rows. Second feed for the analyst leg, which otherwise carries the whole of
+          S_S on FMP alone. Maps to buy/hold/sell counts, not a vendor score, so the two
+          feeds are comparable. Finnhub's own price target is 403 on this tier, so target
+          consensus stays sole-sourced on FMP.
 
   - id: fred
     display_name: FRED (Federal Reserve Bank of St. Louis)
@@ -237,13 +283,22 @@ sources:
         cache_provider: fred
         cache_endpoint: release_dates
         cache_target_template: "10"
-        probe_enabled: false
+        probe_enabled: true
         required_json_paths:
           - release_dates
         note: >-
           Scheduled publication dates for one release - the macro calendar FMP leaves
-          paywalled. Probe disabled because it needs a release_id resolved from
-          series_release first; it answered HTTP 200 with 9,558 dates on 2026-08-31.
+          paywalled, and since 2026-09-02 the source of `macro_calendar`. Asked twice per
+          release: backwards to date a reading by its publication, forwards for what is
+          scheduled next, cached as `<release_id>` and `<release_id>_upcoming`. The
+          realtime period does bound the dates returned - release 18 answered 2,493 dates
+          for a ten-year window and 22 for the next thirty days, 21 of them still in the
+          future. The forward call requires `realtime_start` rather than a populated
+          `release_dates`: a monthly release with no date this month answers `count: 0`
+          with an empty list, and that is the calendar's answer, not a failed call. The
+          historical call keeps the strict requirement, because zero dates over ten years
+          is not plausible. Preflight probes known release 10 directly; live pipeline
+          resolves release ids through `series_release` before asking this endpoint.
       - id: series_release
         component: S_M
         method: GET
@@ -251,12 +306,41 @@ sources:
         cache_provider: fred
         cache_endpoint: series_release
         cache_target_template: CPIAUCSL
-        probe_enabled: false
+        probe_enabled: true
         required_json_paths:
           - releases
         note: >-
           Maps a series to the release that publishes it, so calendar entries can be joined
           to the factor they move. Verified 2026-08-31: CPIAUCSL -> release_id 10.
+
+  - id: twelve_data
+    display_name: Twelve Data
+    priority: fallback
+    geography: [US]
+    source_type: http_json
+    components: [price_history]
+    entitlement: key_required_metered
+    staleness_bound: daily
+    credential_env: TWELVE_DATA_API_KEY
+    # Basic plan: 8 API credits/minute and 800/day. The time_series endpoint costs
+    # 1 credit per symbol and is wired only behind FMP for names FMP gates by symbol.
+    endpoints:
+      - id: time_series
+        component: price_history
+        method: GET
+        url_template: https://api.twelvedata.com/time_series?symbol={ticker}&interval=1day&start_date={from_date}&end_date={to_date}&apikey={api_key}
+        cache_provider: twelve_data
+        cache_endpoint: time_series
+        cache_target_template: "{ticker}"
+        probe_enabled: true
+        probe_symbol: AVGO
+        probe_window_days: 400
+        required_json_paths:
+          - values
+        note: >-
+          Daily OHLCV fallback for FMP's free-plan symbol gates. Verified before wiring
+          for AVGO, ORCL, MU, QQQ, CRWV and AMAT; RHM.DE and LDO.MI remain paid-plan
+          gated on Twelve Data and stay out of this US fallback.
 
   - id: fmp
     display_name: Financial Modeling Prep
@@ -350,6 +434,34 @@ sources:
         note: >-
           News fallback when Alpha Vantage is unavailable. Restricted on the current plan;
           Alpha Vantage NEWS_SENTIMENT carries the sentiment leg.
+      - id: senate_latest
+        component: S_S
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/senate-latest?apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: senate_latest
+        probe_enabled: true
+        cache_target_template: all
+        required_json_paths:
+          - root
+        note: >-
+          Market-wide congressional disclosure feed. Do not pass symbol, limit, or page:
+          the current free plan serves the unfiltered 100-row feed and gates the
+          per-symbol/paginated variants. Filter locally against the run universe.
+      - id: house_latest
+        component: S_S
+        method: GET
+        url_template: https://financialmodelingprep.com/stable/house-latest?apikey={api_key}
+        cache_provider: fmp
+        cache_endpoint: house_latest
+        probe_enabled: true
+        cache_target_template: all
+        required_json_paths:
+          - root
+        note: >-
+          Market-wide congressional disclosure feed. Do not pass symbol, limit, or page:
+          the current free plan serves the unfiltered 100-row feed and gates the
+          per-symbol/paginated variants. Filter locally against the run universe.
       - id: insider_trades
         component: S_I
         method: GET
@@ -500,6 +612,30 @@ sources:
         required_json_paths:
           - root
         note: Quarterly 13F holdings extract; plan-gated on most tiers.
+
+  - id: apewisdom
+    display_name: ApeWisdom
+    priority: fallback
+    geography: [US]
+    source_type: http_json
+    components: [S_S]
+    entitlement: keyless_public_api
+    staleness_bound: daily
+    endpoints:
+      - id: retail_momentum
+        component: S_S
+        method: GET
+        url_template: https://apewisdom.io/api/v1.0/filter/all-stocks/page/1
+        cache_provider: apewisdom
+        cache_endpoint: retail_momentum
+        probe_enabled: true
+        cache_target_template: all_stocks_page_1
+        required_json_paths:
+          - results
+        note: >-
+          Keyless all-stocks attention feed with mentions, upvotes, rank, and
+          mentions_24h_ago. This measures retail attention momentum, not bullish/bearish
+          sentiment.
 
   - id: finra
     display_name: FINRA short sale volume

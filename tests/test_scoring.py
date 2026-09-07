@@ -82,16 +82,22 @@ def test_eu_formula_uses_eu_weights() -> None:
 
 
 def test_missing_optional_components_are_dropped_and_do_not_pull_score_to_neutral() -> None:
+    # `S_S` is required for V since G5, so it can no longer stand as the example of an
+    # optional component being dropped. `S_I` and `S_F` are the optional ones now, and
+    # the property under test is unchanged: a dropped leg is re-normalized away, never
+    # scored as zero, and an optional absence does not touch the tier.
     result = build_scoring_result(
         make_candidate(expression_class="V"),
-        [component("S_M", 1.0)],
+        [component("S_M", 1.0), component("S_S", 1.0)],
         options_structure=structure(score=1.0),
         run_date=RUN_DATE,
     )
 
     assert result.s_cte == pytest.approx(1.0)
-    assert result.weights_used == pytest.approx({"S_M": 0.30 / 0.55, "S_O": 0.25 / 0.55})
-    assert result.component("S_S").weight_used == 0.0
+    assert result.weights_used == pytest.approx(
+        {"S_M": 0.30 / 0.75, "S_O": 0.25 / 0.75, "S_S": 0.20 / 0.75}
+    )
+    assert result.component("S_F").weight_used == 0.0
     assert result.component("S_I").missing_reason == "component not supplied"
     assert result.tier is ConfidenceTier.A
     assert any("re-normalized" in note for note in result.notes)
@@ -113,10 +119,14 @@ def test_missing_required_component_scores_but_floors_to_tier_c() -> None:
 
 
 def test_required_partial_or_aggregator_component_is_tier_b_not_tier_c() -> None:
+    # `S_S` joined the V/E required set (G5), so it is supplied verified here: this test
+    # is about a *degraded* required component producing Tier B, and an absent one would
+    # floor to C for a different reason and hide the behaviour under test.
     partial = build_scoring_result(
         make_candidate(expression_class="V"),
         [
             component("S_M", 0.20),
+            component("S_S", 0.10),
             component("S_O", 0.30, validation_status="partial", source_quality="primary"),
         ],
         run_date=RUN_DATE,
@@ -126,6 +136,7 @@ def test_required_partial_or_aggregator_component_is_tier_b_not_tier_c() -> None
         make_candidate(expression_class="V"),
         [
             component("S_M", 0.20),
+            component("S_S", 0.10),
             component("S_O", 0.30, source_quality="aggregator"),
         ],
         run_date=RUN_DATE,
@@ -233,9 +244,20 @@ def test_component_result_and_score_candidate_alias_are_supported() -> None:
         source_quality="primary",
     )
 
+    sentiment = ComponentResult(
+        component="S_S",
+        ticker="TEST",
+        as_of=AS_OF,
+        geography="US",
+        available=True,
+        score=0.10,
+        validation_status="verified",
+        source_quality="primary",
+    )
+
     result = score_candidate(
         make_candidate(expression_class="V"),
-        [macro],
+        [macro, sentiment],
         options_structure=structure(score=0.50),
         run_date=RUN_DATE,
     )
@@ -261,7 +283,7 @@ def test_scoring_report_matrix_and_storage_rows() -> None:
         [
             ScoringContext(
                 subject=make_candidate(ticker="ALT", expression_class="V"),
-                components=[component("S_M", 0.20)],
+                components=[component("S_M", 0.20), component("S_S", 0.10)],
                 options_structure=structure(score=0.30),
             )
         ],

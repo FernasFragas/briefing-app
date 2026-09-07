@@ -4,6 +4,7 @@ from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 import os
+from pathlib import Path
 from statistics import stdev
 from typing import Any
 
@@ -37,6 +38,7 @@ from sqlalchemy.engine import Connection, Engine
 
 
 metadata = MetaData()
+LOCAL_SQLITE_FILENAME = "briefing.sqlite3"
 
 
 def _id_type() -> BigInteger:
@@ -258,6 +260,14 @@ class StorageRepository:
     @classmethod
     def from_env(cls) -> "StorageRepository":
         return cls(create_engine_from_env())
+
+    @classmethod
+    def local_sqlite(cls, data_dir: str | os.PathLike[str]) -> "StorageRepository":
+        path = Path(data_dir) / LOCAL_SQLITE_FILENAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        engine = create_engine(f"sqlite+pysqlite:///{path}", future=True)
+        create_schema(engine)
+        return cls(engine)
 
     def upsert_briefing_run(
         self,

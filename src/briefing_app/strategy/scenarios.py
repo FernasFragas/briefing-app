@@ -102,6 +102,35 @@ class ScenarioTable:
         )
 
     @property
+    def probability_above_spot(self) -> float:
+        return _bounded_probability(
+            self.probability_above_one_sigma + self._probability_within_one_sigma_above_spot
+        )
+
+    @property
+    def probability_below_spot(self) -> float:
+        return _bounded_probability(
+            self.probability_below_one_sigma + self._probability_within_one_sigma_below_spot
+        )
+
+    @property
+    def _probability_within_one_sigma_above_spot(self) -> float:
+        row = self._row("within 1 sigma")
+        if row is None:
+            return 0.0
+        return row.probability * _fraction_above_spot(row.lower, row.upper, self.spot)
+
+    @property
+    def _probability_within_one_sigma_below_spot(self) -> float:
+        row = self._row("within 1 sigma")
+        if row is None:
+            return 0.0
+        return row.probability * (1.0 - _fraction_above_spot(row.lower, row.upper, self.spot))
+
+    def _row(self, label: str) -> ScenarioRow | None:
+        return next((row for row in self.rows if row.label == label), None)
+
+    @property
     def diverging_rows(self) -> tuple[ScenarioRow, ...]:
         return tuple(row for row in self.rows if row.diverges)
 
@@ -115,12 +144,18 @@ class ScenarioTable:
             "probability_in_one_sigma": self.probability_in_one_sigma,
             "probability_above_one_sigma": self.probability_above_one_sigma,
             "probability_below_one_sigma": self.probability_below_one_sigma,
+            "probability_above_spot": self.probability_above_spot,
+            "probability_below_spot": self.probability_below_spot,
             "diagnostics": list(self.diagnostics),
         }
 
     def probabilities(self) -> dict[str, float]:
         """Flat label -> probability map, for the `setup_signal` JSON column."""
-        return {row.label: row.probability for row in self.rows}
+        return {
+            **{row.label: row.probability for row in self.rows},
+            "above spot": self.probability_above_spot,
+            "below spot": self.probability_below_spot,
+        }
 
 
 def build_scenario_table(
@@ -212,6 +247,20 @@ def _bands_from_cdfs(cdfs: Sequence[float]) -> tuple[float, ...]:
     """Turn cumulative boundary probabilities into the mass inside each band."""
     edges = [0.0, *cdfs, 1.0]
     return tuple(max(0.0, edges[i + 1] - edges[i]) for i in range(len(edges) - 1))
+
+
+def _fraction_above_spot(lower: float | None, upper: float | None, spot: float) -> float:
+    if lower is None or upper is None or upper <= lower:
+        return 0.5
+    if spot <= lower:
+        return 1.0
+    if spot >= upper:
+        return 0.0
+    return _bounded_probability((upper - spot) / (upper - lower))
+
+
+def _bounded_probability(value: float) -> float:
+    return min(max(float(value), 0.0), 1.0)
 
 
 def _measured_cdfs(

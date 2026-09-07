@@ -101,6 +101,7 @@ def dashboard_payload(
                 grade_score=77.4,
                 thesis_probability=0.68,
                 thesis_band="beyond +1 sigma",
+                direction="long",
                 s_cte=0.62,
                 tier="A",
                 status="TRADEABLE",
@@ -375,7 +376,23 @@ def test_dashboard_html_trading_ideas_empty_state_is_explicit() -> None:
     assert 'class="ideas-table"' not in html
 
 
-def test_dashboard_html_ideas_table_scrolls_and_places_grade_next_to_tier() -> None:
+def test_dashboard_html_ideas_table_scrolls_and_carries_no_tier_badge() -> None:
+    """The tier column was removed from the graded ideas table on 2026-09-06.
+
+    It was renamed from `..._places_grade_next_to_tier`, and the rename is the point: the
+    badge was removed by decision, not by accident, so a test asserting its adjacency to
+    the grade would now pin the wrong behaviour.
+
+    Why it went: with `REQUIRED_COMPONENTS` at `{S_O, S_M}` every row is Tier A and the
+    ceiling binds nothing. Requiring `S_S` was tried and reverted -- it returned 0 A / 16 B
+    / 2 C on live run `daily-2026-09-06-e270378b`, because `S_S` is `aggregator`-sourced by
+    construction and can never qualify a row for Tier A. Either way the badge is constant
+    across the universe, so the grade carries confidence on its own.
+
+    Tier is still rendered in the diagnostic sections (setups, matrix, prior scorecard),
+    where it sits beside the reasons that produced it.
+    """
+
     html = render_dashboard_html(dashboard_payload())
     parser = parse_dashboard_html(html)
     ideas_rows = parser.rows_by_section["trading-ideas"]
@@ -384,8 +401,150 @@ def test_dashboard_html_ideas_table_scrolls_and_places_grade_next_to_tier() -> N
     assert ".table-scroll" in html
     assert "overflow-x: auto;" in html
     assert "overflow-x: hidden;" in html
-    assert ideas_rows[0][2:4] == ["Grade", "Tier"]
-    assert ideas_rows[1][2:4] == ["B+ (77.4)", "A"]
+    assert "Tier" not in ideas_rows[0]
+    assert ideas_rows[0][1:5] == ["Status", "Setup", "Direction", "Grade"]
+    assert ideas_rows[1][1:5] == [
+        "TRADEABLE",
+        "EVENT_DIRECTIONAL_LONG",
+        "long",
+        "B+ (77.4)",
+    ]
     assert "1 of 3 legs" in html
     assert "fixture leg counts describe the fixture, not live sourcing" in html
     assert "executive_tone: no transcript source available" in html
+
+
+def test_dashboard_html_publishes_the_direction_the_grade_was_computed_against() -> None:
+    """`alignment()` branches on direction, and `beyond +/-1 sigma` does not imply it.
+
+    Without this column a skew structure carrying a real LONG direction and a NEUTRAL
+    straddle publish identical HTML rows and grade differently, so the rendered page
+    alone cannot be reconciled.
+    """
+    rows = [
+        TradingIdeaRow(
+            ticker="NVDA",
+            status="TRADEABLE",
+            direction="long",
+            thesis_band="beyond +1 sigma",
+            grade_letter="B+",
+            grade_score=77.4,
+        ),
+        TradingIdeaRow(
+            ticker="SPY",
+            status="TRADEABLE",
+            direction="neutral",
+            thesis_band="beyond +1 sigma",
+            grade_letter="C",
+            grade_score=54.0,
+        ),
+        TradingIdeaRow(ticker="TSLA", status="UNSCORED"),
+    ]
+    parser = parse_dashboard_html(
+        render_dashboard_html(dashboard_payload(trading_ideas=rows))
+    )
+    table = parser.rows_by_section["trading-ideas"]
+    column = table[0].index("Direction")
+
+    assert [row[column] for row in table[1:]] == ["long", "neutral", "unavailable"]
+    # Same band, same grade columns to a reader's eye - only direction separates them.
+    thesis = table[0].index("Thesis")
+    assert table[1][thesis] == table[2][thesis]
+
+
+def mixed_formula_ideas() -> list[TradingIdeaRow]:
+    """Three rows whose composites rest on different component sets.
+
+    Mirrors the shape of a real run: unsourceable components are dropped and the
+    remaining weights renormalised, so these three grades are not the same quantity.
+    """
+    return [
+        TradingIdeaRow(
+            ticker="QQQ",
+            grade_letter="B",
+            grade_score=67.89,
+            tier="A",
+            status="TRADEABLE",
+            scored_components=["S_M", "S_O"],
+            missing_components=["S_S", "S_I", "S_F"],
+            weight_profile="US",
+        ),
+        TradingIdeaRow(
+            ticker="ORCL",
+            grade_letter="F",
+            grade_score=34.75,
+            tier="A",
+            status="TRADEABLE",
+            scored_components=["S_M", "S_O", "S_S"],
+            missing_components=["S_I", "S_F"],
+            weight_profile="US",
+        ),
+        TradingIdeaRow(
+            ticker="MSFT",
+            grade_letter="A",
+            grade_score=83.82,
+            tier="A",
+            status="TRADEABLE",
+            scored_components=["S_M", "S_O", "S_S", "S_I"],
+            missing_components=["S_F"],
+            weight_profile="US",
+        ),
+    ]
+
+
+def ideas_row_html(html: str, ticker: str) -> str:
+    body = html.split('class="ideas-table"', 1)[1]
+    rows = body.split("<tr")
+    return next(fragment for fragment in rows if f">{ticker}</td>" in fragment)
+
+
+def test_dashboard_html_grade_cell_names_how_many_components_scored_it() -> None:
+    """A reader must see that QQQ's grade is a 2-component number and MSFT's a 4."""
+    parser = parse_dashboard_html(
+        render_dashboard_html(dashboard_payload(trading_ideas=mixed_formula_ideas()))
+    )
+    grade_column = parser.rows_by_section["trading-ideas"][0].index("Grade")
+    grades = {
+        row[0]: row[grade_column]
+        for row in parser.rows_by_section["trading-ideas"][1:]
+    }
+
+    assert grades["QQQ"] == "B (67.89) 2/5"
+    assert grades["ORCL"] == "F (34.75) 3/5"
+    assert grades["MSFT"] == "A (83.82) 4/5"
+
+
+def test_dashboard_html_flags_rows_graded_on_fewer_than_three_components() -> None:
+    html = render_dashboard_html(dashboard_payload(trading_ideas=mixed_formula_ideas()))
+
+    assert 'class="thin-evidence"' in ideas_row_html(html, "QQQ")
+    assert "comp-count thin" in ideas_row_html(html, "QQQ")
+    for ticker in ("ORCL", "MSFT"):
+        assert "thin-evidence" not in ideas_row_html(html, ticker)
+        assert "comp-count thin" not in ideas_row_html(html, ticker)
+    assert ".comp-count.thin" in html and "tr.thin-evidence" in html
+
+
+def test_dashboard_html_explains_the_component_count_in_a_legend() -> None:
+    html = render_dashboard_html(dashboard_payload(trading_ideas=mixed_formula_ideas()))
+
+    legend = " ".join(
+        html.split('<p class="legend', 1)[1].split("</p>", 1)[0].split()
+    )
+    assert "remaining weights renormalised" in legend
+    assert "fewer than 3 components are highlighted" in legend
+
+
+def test_dashboard_html_omits_the_component_count_for_an_unscored_row() -> None:
+    """A row that never produced a score has no composite to describe."""
+    parser = parse_dashboard_html(
+        render_dashboard_html(
+            dashboard_payload(
+                trading_ideas=[TradingIdeaRow(ticker="TSLA", status="UNSCORED")]
+            )
+        )
+    )
+    header = parser.rows_by_section["trading-ideas"][0]
+    row = parser.rows_by_section["trading-ideas"][1]
+
+    assert row[header.index("Grade")] == "unavailable"

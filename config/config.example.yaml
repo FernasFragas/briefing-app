@@ -64,6 +64,7 @@ report:
   grading:
     probability_weight: 0.60
     alignment_weight: 0.40
+    directional_probability_weight: 0.20
     divergence_penalty: 10.0
     crowding_penalty_scale: 20.0
 
@@ -83,25 +84,155 @@ components:
       policy_stance: 0.2
       policy_note: Export-control regime is the dominant policy variable; re-source each cycle.
       policy_source: Federal Register / BIS rule updates
+    Semiconductor Equipment:
+      sensitivities:
+        policy_rate: -0.6
+        real_yields: -0.5
+        dollar: -0.3
+        cpi: -0.4
+        real_gdp: 0.5
+        copper: 0.2
+      policy_stance: -0.2
+      policy_note: Export controls are the dominant standing policy risk for wafer-fab equipment.
+      policy_source: Federal Register / BIS rule updates
+    Hardware:
+      sensitivities:
+        policy_rate: -0.5
+        real_yields: -0.5
+        dollar: -0.3
+        cpi: -0.4
+        real_gdp: 0.4
+        copper: -0.2
+      policy_stance: -0.1
+      policy_note: Tariffs, supply-chain controls, and platform regulation are mild standing headwinds.
+      policy_source: Config sector exposure baseline
+    Software:
+      sensitivities:
+        policy_rate: -0.6
+        real_yields: -0.6
+        dollar: -0.2
+        cpi: -0.3
+        real_gdp: 0.5
+        copper: 0.0
+      policy_stance: 0.0
+      policy_note: No broad standing policy tilt declared beyond named catalysts.
+      policy_source: Config sector exposure baseline
+    Internet:
+      sensitivities:
+        policy_rate: -0.6
+        real_yields: -0.5
+        dollar: -0.2
+        cpi: -0.4
+        real_gdp: 0.6
+        copper: 0.0
+      policy_stance: -0.2
+      policy_note: Platform regulation and antitrust are standing headwinds.
+      policy_source: FTC / DOJ / EU DMA regulatory posture
+    AI Infrastructure:
+      sensitivities:
+        policy_rate: -0.8
+        real_yields: -0.7
+        dollar: -0.2
+        cpi: -0.4
+        real_gdp: 0.5
+        natural_gas: -0.3
+        copper: -0.2
+      policy_stance: -0.1
+      policy_note: Power availability, permitting, and export controls are mild standing headwinds.
+      policy_source: Config sector exposure baseline
     Energy:
       sensitivities:
+        # brent only, not brent + wti. Both map to FRED release 212 and track the same
+        # crude signal, and `_bucket_sub_score` takes a plain mean - carrying both gave
+        # oil two of the commodity bucket's three slots against natural_gas's one, so a
+        # single move counted twice. Brent is the global benchmark and keeps the slot;
+        # `wti` stays mapped in FRED_MACRO_SERIES for anyone who declares it.
         brent: 0.8
-        wti: 0.8
         natural_gas: 0.5
         dollar: -0.4
         policy_rate: -0.2
+        cpi: -0.2
+        real_gdp: 0.3
+      policy_stance: 0.1
+      policy_note: Permitting and strategic-reserve policy are a mild standing tailwind.
+      policy_source: Config sector exposure baseline
     Financials:
       sensitivities:
         policy_rate: 0.5
         yield_curve: 0.7
         credit_spreads: -0.6
         real_gdp: 0.4
+        copper: 0.0
+      policy_stance: -0.1
+      policy_note: Capital, supervision, and deposit regulation are a mild standing headwind.
+      policy_source: Config sector exposure baseline
     Index:
       sensitivities:
         policy_rate: -0.4
         cpi: -0.4
         real_gdp: 0.5
         credit_spreads: -0.5
+        copper: 0.0
+      policy_stance: 0.0
+      policy_note: Broad index policy stance is neutral; named macro releases carry the directional signal.
+      policy_source: Config sector exposure baseline
+    Retail:
+      sensitivities:
+        policy_rate: -0.4
+        real_yields: -0.3
+        dollar: 0.1
+        cpi: -0.6
+        real_gdp: 0.4
+        brent: -0.2
+        natural_gas: -0.1
+      policy_stance: 0.0
+      policy_note: No broad standing policy tilt declared beyond named catalysts.
+      policy_source: Config sector exposure baseline
+    Industrials:
+      sensitivities:
+        policy_rate: -0.4
+        real_yields: -0.3
+        dollar: -0.2
+        cpi: -0.2
+        real_gdp: 0.6
+        copper: 0.3
+        brent: -0.1
+      policy_stance: 0.0
+      policy_note: No broad standing policy tilt declared beyond named catalysts.
+      policy_source: Config sector exposure baseline
+    Transport:
+      sensitivities:
+        policy_rate: -0.3
+        dollar: -0.1
+        cpi: -0.2
+        real_gdp: 0.6
+        brent: -0.6
+        natural_gas: -0.2
+      policy_stance: 0.0
+      policy_note: No broad standing policy tilt declared beyond named catalysts.
+      policy_source: Config sector exposure baseline
+    Autos:
+      sensitivities:
+        policy_rate: -0.6
+        real_yields: -0.4
+        cpi: -0.3
+        real_gdp: 0.5
+        copper: -0.2
+        brent: -0.1
+      policy_stance: -0.2
+      policy_note: Tariff, emissions, and EV-credit policy are standing headwinds.
+      policy_source: Config sector exposure baseline
+    Defense:
+      sensitivities:
+        policy_rate: -0.2
+        dollar: -0.1
+        cpi: -0.1
+        real_gdp: 0.2
+        copper: -0.1
+        brent: 0.1
+      policy_stance: 0.4
+      policy_note: Elevated defense budgets are a standing policy tailwind; procurement timing remains catalyst-specific.
+      policy_source: Government budget and procurement cycle
   # Release-cadence-relative staleness bounds, per the plan's staleness table.
   macro_max_age_days: 45
   sentiment_max_age_days: 7
@@ -120,21 +251,39 @@ providers:
   # hidden provider tails. A single string is still accepted for local configs.
   options: [cboe, alpha_vantage]
   quotes: [alpha_vantage]
-  prices: [fmp, alpha_vantage]
-  news: [alpha_vantage, fmp]
-  earnings: [alpha_vantage, fmp]
+  # Twelve Data backs up FMP's free-plan symbol gates for AVGO, ORCL, MU, QQQ,
+  # CRWV and AMAT. Alpha Vantage remains last because a free key has only 25 daily
+  # requests and price history is already covered twice over.
+  prices: [fmp, twelve_data, alpha_vantage]
+  # Finnhub leads the broad universe because it costs no Alpha Vantage budget. Alpha
+  # Vantage returned more scored same-ticker articles in the N4 raised-limit probe, so
+  # it is promoted only for the shortlist below.
+  news: [finnhub, alpha_vantage, fmp]
+  # Hybrid AV news allocation: names here try Alpha Vantage NEWS_SENTIMENT before
+  # Finnhub so vendor scoring/relevance is spent only where a trade decision may turn on
+  # it. Seeded from the 2026-09-03 live run's tradeable names.
+  news_alpha_vantage_shortlist: [DE, ORCL, AVGO, PLTR]
+  earnings: [fmp, alpha_vantage]
   # FRED leads: official primary data rather than an aggregator, which upgrades S_M's
   # source-quality label. All 8 adopted series verified entitled on a free key 2026-08-31.
   # FMP stays as fallback; the Alpha Vantage macro slot is a dead key and is not listed.
   macro: [fred, fmp]
-  analyst: [fmp]
+  # FMP first: grades-consensus returns analyst counts plus a consensus price target, and
+  # Finnhub's price-target endpoint is 403 on the free tier. Finnhub backs it up for US
+  # names only - its free tier is US-only, so EU names stay sole-sourced on FMP (PA8).
+  analyst: [fmp, finnhub]
   # SEC EDGAR leads insider: Form 4 is the primary record, free and unmetered, while both
   # aggregators behind it are a spent key and a plan-gated endpoint.
   insider: [sec_edgar, alpha_vantage, fmp]
-  institutional: [alpha_vantage, fmp]
-  put_call: [alpha_vantage]
-  political: []
-  retail: []
+  # Empty by design: S_F (13F institutional flow) is declared permanently n/a - closing
+  # it needs a curated filer universe, a table and a two-quarter diff, which 0.10 of the
+  # US weight does not justify, and an aggregator was rejected because EDGAR is the
+  # primary record. Nothing is fetched, so nothing is spent.
+  institutional: []
+  # Put/call percentile baselines are self-built from persisted option snapshots.
+  put_call: []
+  political: [fmp]
+  retail: [apewisdom]
   # FINRA's consolidated file is free and needs no key. It carries daily short *volume*
   # only, scored as a labelled flow proxy - see docs/alternatives/pa1-borrow.md.
   short_interest: [finra]
@@ -199,7 +348,8 @@ strategy:
 # Default to fixture data so local acceptance tests run without credentials. Set
 # `data_mode: live` or pass `--data-mode live` to fetch provider-backed market data
 # after the candidate gate. Live mode uses CBOE delayed options by default, plus
-# Alpha Vantage/FMP when their API keys are present or cache-only replay is enabled.
+# FMP, Twelve Data, Finnhub, FRED, SEC EDGAR, FINRA and Alpha Vantage fallbacks when
+# their keys, public feeds, or cache-only replays are available.
 pipeline:
   data_mode: fixture
   skip_non_market_days: true

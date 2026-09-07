@@ -58,6 +58,7 @@ def test_load_config_exposes_report_grading_defaults(tmp_path: Path) -> None:
 
     assert config.report.grading.probability_weight == pytest.approx(0.60)
     assert config.report.grading.alignment_weight == pytest.approx(0.40)
+    assert config.report.grading.directional_probability_weight == pytest.approx(0.20)
     assert config.report.grading.divergence_penalty == pytest.approx(10.0)
     assert config.report.grading.crowding_penalty_scale == pytest.approx(20.0)
 

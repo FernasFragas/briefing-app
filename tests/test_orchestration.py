@@ -103,21 +103,26 @@ class FakeLiveFetcher:
                     }
                 ]
             )
-        if "apewisdom.io/api/v1.0/filter/all-stocks/page/1" in url:
-            return json_result(
-                {
-                    "results": [
-                        {
-                            "ticker": "NVDA",
-                            "mentions": 254,
-                            "mentions_24h_ago": 56,
-                            "upvotes": 679,
-                            "rank": 1,
-                            "rank_24h_ago": 3,
-                        }
-                    ]
-                }
-            )
+        if "apewisdom.io/api/v1.0/filter/all-stocks/page/" in url:
+            # The feed paginates and the pipeline now reads it to the end, so the fake
+            # answers every page - and answers an empty one after the first, which is
+            # how a short feed stops the loop.
+            if url.endswith("/page/1"):
+                return json_result(
+                    {
+                        "results": [
+                            {
+                                "ticker": "NVDA",
+                                "mentions": 254,
+                                "mentions_24h_ago": 56,
+                                "upvotes": 679,
+                                "rank": 1,
+                                "rank_24h_ago": 3,
+                            }
+                        ]
+                    }
+                )
+            return json_result({"results": []})
         if "historical-price-eod" in url:
             return json_result(_fmp_price_history("NVDA"))
         if "economic-indicators" in url:
@@ -639,6 +644,8 @@ def test_daily_live_run_fetches_provider_payloads_and_scores(tmp_path) -> None:
 
     assert output.status == STATUS_SUCCEEDED
     assert output.data_mode == "live"
+    assert output.storage_run_id is not None
+    assert (tmp_path / "data" / "briefing.sqlite3").exists()
     assert output.dashboard is not None and output.dashboard.data_mode == "live"
     assert output.scoring_report is not None
     result = output.scoring_report.results[0]
@@ -659,6 +666,10 @@ def test_daily_live_run_fetches_provider_payloads_and_scores(tmp_path) -> None:
     assert any("cdn.cboe.com" in url for url in fetcher.calls)
     assert any("historical-price-eod" in url for url in fetcher.calls)
     assert not any("HISTORICAL_PUT_CALL_RATIO" in url for url in fetcher.calls)
+    assert not any(
+        "no database is configured" in row.field_value
+        for row in output.dashboard.evidence_ledger
+    )
 
     # Price history comes from FMP, whose EOD series is free and unmetered; Alpha
     # Vantage's adjusted series is premium-only and must not be reached for.
@@ -689,6 +700,9 @@ def test_daily_live_run_fetches_provider_payloads_and_scores(tmp_path) -> None:
     assert sum("senate-latest" in url for url in fetcher.calls) == 1
     assert sum("house-latest" in url for url in fetcher.calls) == 1
     assert sum("apewisdom.io/api/v1.0/filter/all-stocks/page/1" in url for url in fetcher.calls) == 1
+    # PC2: the feed is read past page 1, and an empty page ends it rather than costing
+    # all nine requests.
+    assert sum("all-stocks/page/" in url for url in fetcher.calls) == 2
 
 
 def test_price_history_falls_back_to_twelve_data_for_fmp_symbol_gate(tmp_path) -> None:
@@ -1039,6 +1053,39 @@ def test_configured_news_chain_falls_back_to_alpha_vantage_on_failure_or_no_data
     assert not any("financialmodelingprep" in url for url in fetcher.calls)
     if finnhub_mode == "failure":
         assert any("Finnhub company news unavailable" in issue for issue in issues)
+
+
+def test_news_shortlist_promotes_alpha_vantage_for_one_ticker(tmp_path) -> None:
+    fetcher = FakeLiveFetcher()
+    source = ConfigurableNewsDataSource(
+        settings=_news_settings(tmp_path),
+        fetcher=fetcher,
+        finnhub_batch=_finnhub_news_batch(has_articles=True),
+    )
+    config = fixture_config(["NVDA"], data_mode="live").model_copy(
+        update={
+            "providers": ProvidersSettings(
+                news=["finnhub", "alpha_vantage"],
+                news_alpha_vantage_shortlist=["NVDA"],
+            )
+        }
+    )
+
+    batch = source._news_batch(
+        "NVDA",
+        config=config,
+        run_date=RUN_DATE,
+        raw_cache=RawCache(tmp_path / "data"),
+        responses=[],
+        raw_paths=[],
+        issues=[],
+    )
+
+    assert batch is not None
+    assert batch.source == "Alpha Vantage NEWS_SENTIMENT"
+    assert source.news_provider_calls == ["alpha_vantage"]
+    assert any("NEWS_SENTIMENT" in url and "limit=1000" in url for url in fetcher.calls)
+    assert not any("finnhub.io" in url for url in fetcher.calls)
 
 
 def test_failed_ticker_is_diagnostic_but_run_still_renders(tmp_path) -> None:
