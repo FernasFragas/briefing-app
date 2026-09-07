@@ -35,6 +35,7 @@ from briefing_app.dashboard.models import DashboardPayload, TradingIdeaRow
 from briefing_app.models.candidate import Direction, ExpressionClass, Geography, Instrument
 from briefing_app.models.gate import GateDecision
 from briefing_app.models.scoring import ComponentScore, ConfidenceTier, Posture, ScoringResult
+from briefing_app.options_math import OptionsStructureResult
 from briefing_app.strategy import (
     CandidateSetupResult,
     Invalidation,
@@ -49,7 +50,7 @@ from briefing_app.strategy import (
 )
 from briefing_app.strategy.scenarios import ScenarioRow, ScenarioTable
 from briefing_app.universe.gate import run_gate
-from tests.conftest import RUN_DATE, make_candidate
+from tests.conftest import RUN_DATE, make_candidate, make_catalyst
 
 NOW = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
 
@@ -81,6 +82,37 @@ def test_dashboard_payload_v2_preserves_old_shape_construction() -> None:
     assert payload.trading_ideas == []
 
 
+def test_evidence_targets_do_not_create_fake_ticker_sections() -> None:
+    score = ScoringResult(
+        ticker="NVDA",
+        expression_class=ExpressionClass.E,
+        geography=Geography.US,
+        s_cte=0.25,
+        tier=ConfidenceTier.A,
+    )
+
+    payload = build_dashboard_payload(
+        run_id="ledger-targets",
+        run_date=RUN_DATE,
+        generated_at=NOW,
+        scores=[score],
+        evidence_rows=[
+            {
+                "ticker": "10",
+                "component": "S_M",
+                "field_name": "raw_cache_path",
+                "field_value": "data/raw/fred/release_dates/10.json",
+                "source": "FRED release/dates",
+                "as_of": NOW,
+            }
+        ],
+    )
+
+    assert [row.ticker for row in payload.master_alpha_selection_matrix] == ["NVDA"]
+    assert [section.ticker for section in payload.per_ticker_sections] == ["NVDA"]
+    assert payload.evidence_ledger[0].ticker == "10"
+
+
 def test_audit_json_emits_trading_ideas_without_expanding_counts() -> None:
     payload = DashboardPayload(
         run_id="ideas-shape",
@@ -90,6 +122,7 @@ def test_audit_json_emits_trading_ideas_without_expanding_counts() -> None:
             TradingIdeaRow(
                 ticker="NVDA",
                 setup_type="EVENT_DIRECTIONAL_LONG",
+                direction="long",
                 grade_letter="B+",
                 grade_score=77.4,
                 thesis_probability=0.68,
@@ -113,11 +146,17 @@ def test_audit_json_emits_trading_ideas_without_expanding_counts() -> None:
         {
             "ticker": "NVDA",
             "setup_type": "EVENT_DIRECTIONAL_LONG",
+            # Published so `alignment()` can be re-derived: the thesis band alone does
+            # not name the direction for a `beyond ...` row.
+            "direction": "long",
             "grade_letter": "B+",
             "grade_score": 77.4,
             "thesis_probability": 0.68,
             "thesis_band": "beyond +1 sigma",
             "s_cte": 0.62,
+            "weight_profile": None,
+            "scored_components": [],
+            "missing_components": [],
             "tier": "A",
             "status": "TRADEABLE",
             "catalyst": {
@@ -139,7 +178,7 @@ def test_audit_json_emits_trading_ideas_without_expanding_counts() -> None:
     }
 
 
-def test_fixture_dashboard_build_emits_sorted_trading_ideas() -> None:
+def test_fixture_dashboard_build_emits_action_sorted_trading_ideas() -> None:
     payload = fixture_payload()
     rows = payload.trading_ideas
 
@@ -154,11 +193,9 @@ def test_fixture_dashboard_build_emits_sorted_trading_ideas() -> None:
     assert nvda.grade_score <= _tier_ceiling(nvda.tier)
     assert nvda.blocked_reason is None
 
-    scored = [row.grade_score for row in rows if row.grade_score is not None]
-    assert scored == sorted(scored, reverse=True)
-    assert all(
-        row.grade_score is None
-        for row in rows[len(scored):]
+    assert [row.status for row in rows] == sorted(
+        (row.status for row in rows),
+        key={"TRADEABLE": 0, "WATCHLIST": 1, "BLOCKED": 2, "UNSCORED": 3}.get,
     )
     assert all(
         row.status == "TRADEABLE" or row.blocked_reason
@@ -167,6 +204,240 @@ def test_fixture_dashboard_build_emits_sorted_trading_ideas() -> None:
     for row in rows:
         if row.grade_score is not None:
             assert row.grade_score <= _tier_ceiling(row.tier)
+
+
+def test_tradeable_rows_sort_above_higher_grade_watchlist_rows() -> None:
+    gate_report = run_gate(
+        [
+            make_candidate(ticker="DE", catalysts=[make_catalyst(days_out=2)]),
+            make_candidate(ticker="MSFT", catalysts=[make_catalyst(days_out=2)]),
+            make_candidate(ticker="AMD", catalysts=[make_catalyst(days_out=2)]),
+        ],
+        run_date=RUN_DATE,
+        settings=GateSettings(),
+        run_id="action-sort-gate",
+    )
+    catalysts = {
+        result.ticker: result.primary_catalyst
+        for result in gate_report.results
+    }
+    low_grade_tradeable = Setup(
+        ticker="DE",
+        setup_type=SetupType.EVENT_DIRECTIONAL_LONG,
+        decision=SetupDecision.CANDIDATE,
+        expression_class=ExpressionClass.E,
+        direction=Direction.LONG,
+        horizon_days=10,
+        horizon_label="10d",
+        tier=ConfidenceTier.A,
+        posture=Posture.MODERATE_BEARISH,
+        s_cte=-0.50,
+        instrument=Instrument.SHARES,
+        catalyst=catalysts["DE"],
+        scenario_table=_scenario_table(ticker="DE", above=0.70, within=0.15),
+        invalidation=_invalidation(Direction.LONG),
+        rationale="candidate despite a weak grade",
+        evidence=[
+            SetupEvidence(
+                field_name="s_cte",
+                field_value="-0.50",
+                source="computed",
+                as_of=NOW,
+            )
+        ],
+        size_fraction=1.0,
+    )
+    high_grade_watchlist = Setup(
+        ticker="MSFT",
+        setup_type=SetupType.WATCHLIST_NO_TRADE,
+        decision=SetupDecision.WATCHLIST,
+        expression_class=ExpressionClass.E,
+        direction=Direction.LONG,
+        horizon_days=10,
+        horizon_label="10d",
+        tier=ConfidenceTier.A,
+        posture=Posture.STRONG_BULLISH,
+        s_cte=0.90,
+        catalyst=catalysts["MSFT"],
+        scenario_table=_scenario_table(ticker="MSFT", above=0.95, within=0.05),
+        rationale="blocked on volatility history",
+    )
+    setup_report = SetupReport(
+        run_id="action-sort-setups",
+        run_date=RUN_DATE,
+        generated_at=NOW,
+        results=[
+            CandidateSetupResult(
+                ticker="DE",
+                expression_class=ExpressionClass.E,
+                tier=ConfidenceTier.A,
+                setups=[low_grade_tradeable],
+            ),
+            CandidateSetupResult(
+                ticker="MSFT",
+                expression_class=ExpressionClass.E,
+                tier=ConfidenceTier.A,
+                setups=[high_grade_watchlist],
+                rejections=[
+                    SetupRejection(
+                        ticker="MSFT",
+                        setup_type=SetupType.SHORT_PREMIUM_IRON_CONDOR,
+                        code=RejectionCode.IV_RANK_UNAVAILABLE,
+                        detail="no IV rank history for this name",
+                    )
+                ],
+            ),
+        ],
+    )
+    payload = build_dashboard_payload(
+        run_id="action-sort-dashboard",
+        run_date=RUN_DATE,
+        generated_at=NOW,
+        gate_report=gate_report,
+        scores=[
+            ScoringResult(
+                ticker="DE",
+                expression_class=ExpressionClass.E,
+                geography=Geography.US,
+                s_cte=-0.50,
+                tier=ConfidenceTier.A,
+                components=_required_e_components(),
+            ),
+            ScoringResult(
+                ticker="MSFT",
+                expression_class=ExpressionClass.E,
+                geography=Geography.US,
+                s_cte=0.90,
+                tier=ConfidenceTier.A,
+                components=_required_e_components(),
+            ),
+        ],
+        setup_report=setup_report,
+    )
+
+    assert [(row.ticker, row.status) for row in payload.trading_ideas] == [
+        ("DE", "TRADEABLE"),
+        ("MSFT", "WATCHLIST"),
+        ("AMD", "UNSCORED"),
+    ]
+    de = _idea_row(payload.trading_ideas, "DE")
+    msft = _idea_row(payload.trading_ideas, "MSFT")
+    assert de.grade_score is not None
+    assert msft.grade_score is not None
+    assert de.grade_score < msft.grade_score
+    assert msft.blocked_reason == "iv rank unavailable: no IV rank history for this name"
+
+
+def test_trading_ideas_mark_and_group_different_composite_sets() -> None:
+    full_setup = Setup(
+        ticker="FULL",
+        setup_type=SetupType.EVENT_DIRECTIONAL_LONG,
+        decision=SetupDecision.CANDIDATE,
+        expression_class=ExpressionClass.E,
+        direction=Direction.LONG,
+        horizon_days=10,
+        horizon_label="10d",
+        tier=ConfidenceTier.A,
+        posture=Posture.MODERATE_BULLISH,
+        s_cte=0.20,
+        instrument=Instrument.SHARES,
+        catalyst=make_catalyst(days_out=2),
+        scenario_table=_scenario_table(ticker="FULL", above=0.50, within=0.20),
+        invalidation=_invalidation(Direction.LONG),
+        evidence=[
+            SetupEvidence(
+                field_name="s_cte",
+                field_value="0.20",
+                source="computed",
+                as_of=NOW,
+            )
+        ],
+        size_fraction=1.0,
+    )
+    partial_setup = Setup(
+        ticker="PART",
+        setup_type=SetupType.EVENT_DIRECTIONAL_LONG,
+        decision=SetupDecision.CANDIDATE,
+        expression_class=ExpressionClass.E,
+        direction=Direction.LONG,
+        horizon_days=10,
+        horizon_label="10d",
+        tier=ConfidenceTier.A,
+        posture=Posture.STRONG_BULLISH,
+        s_cte=0.95,
+        instrument=Instrument.SHARES,
+        catalyst=make_catalyst(days_out=2),
+        scenario_table=_scenario_table(ticker="PART", above=0.95, within=0.0),
+        invalidation=_invalidation(Direction.LONG),
+        evidence=[
+            SetupEvidence(
+                field_name="s_cte",
+                field_value="0.95",
+                source="computed",
+                as_of=NOW,
+            )
+        ],
+        size_fraction=1.0,
+    )
+    setup_report = SetupReport(
+        run_id="component-set-setups",
+        run_date=RUN_DATE,
+        generated_at=NOW,
+        results=[
+            CandidateSetupResult(
+                ticker="FULL",
+                expression_class=ExpressionClass.E,
+                tier=ConfidenceTier.A,
+                setups=[full_setup],
+            ),
+            CandidateSetupResult(
+                ticker="PART",
+                expression_class=ExpressionClass.E,
+                tier=ConfidenceTier.A,
+                setups=[partial_setup],
+            ),
+        ],
+    )
+
+    payload = build_dashboard_payload(
+        run_id="component-set-dashboard",
+        run_date=RUN_DATE,
+        generated_at=NOW,
+        scores=[
+            ScoringResult(
+                ticker="PART",
+                expression_class=ExpressionClass.E,
+                geography=Geography.US,
+                s_cte=0.95,
+                tier=ConfidenceTier.A,
+                components=_required_e_components(),
+            ),
+            ScoringResult(
+                ticker="FULL",
+                expression_class=ExpressionClass.E,
+                geography=Geography.US,
+                s_cte=0.20,
+                tier=ConfidenceTier.A,
+                components=_all_components(0.20),
+            ),
+        ],
+        setup_report=setup_report,
+    )
+
+    assert [row.ticker for row in payload.trading_ideas] == ["FULL", "PART"]
+    full = _idea_row(payload.trading_ideas, "FULL")
+    partial = _idea_row(payload.trading_ideas, "PART")
+    assert full.grade_score is not None
+    assert partial.grade_score is not None
+    assert partial.grade_score > full.grade_score
+    assert full.scored_components == ["S_M", "S_O", "S_S", "S_I", "S_F"]
+    assert full.missing_components == []
+    assert partial.scored_components == ["S_M", "S_O", "S_S"]
+    assert partial.missing_components == ["S_I", "S_F"]
+    # The direction the grade was computed against is published, so a reader can pick
+    # the right `alignment()` branch without re-deriving it from the thesis band.
+    assert full.direction == "long"
+    assert partial.direction == "long"
 
 
 def test_gate_accepted_without_scoring_result_is_unscored_and_ungraded() -> None:
@@ -203,6 +474,7 @@ def test_gate_accepted_without_scoring_result_is_unscored_and_ungraded() -> None
     assert row.status == "UNSCORED"
     assert row.grade_letter is None
     assert row.grade_score is None
+    assert row.direction is None
     assert row.blocked_reason == "missing scoring result"
 
 
@@ -364,6 +636,56 @@ def test_ticker_section_component_discloses_leg_counts_and_absent_legs() -> None
     assert "executive_tone" in rendered_section
     assert "retail_momentum" in rendered_section
     assert "fixture leg counts describe the fixture, not live sourcing" in rendered_section
+
+
+def test_per_ticker_sections_include_options_component_details() -> None:
+    score = ScoringResult(
+        ticker="NVDA",
+        expression_class=ExpressionClass.E,
+        geography=Geography.US,
+        s_cte=0.25,
+        tier=ConfidenceTier.A,
+        components=[
+            ComponentScore(
+                component="S_O",
+                score=0.20,
+                original_weight=0.25,
+                weight_used=1.0,
+                validation_status="verified",
+                source_quality="primary",
+                required=True,
+                as_of=RUN_DATE,
+            )
+        ],
+    )
+    options = OptionsStructureResult(
+        ticker="NVDA",
+        as_of=NOW,
+        spot=100.0,
+        available=True,
+        score=0.20,
+        sub_scores={"skew": 0.10, "gamma": 0.30, "liquidity": 0.80},
+        diagnostics=("iv_rank baseline still building: 3 of 20 sessions stored",),
+    )
+
+    payload = build_dashboard_payload(
+        run_id="options-component",
+        run_date=RUN_DATE,
+        generated_at=NOW,
+        scores=[score],
+        options_structures={"NVDA": options},
+    )
+
+    section = payload.per_ticker_sections[0]
+    summary = next(item for item in section.components if item["component"] == "S_O")
+    absent = {item["name"]: item["reason"] for item in summary["absent_legs"]}
+
+    assert summary["score"] == pytest.approx(0.20)
+    assert summary["legs_defined"] == 6
+    assert summary["legs_scored"] == 3
+    assert set(absent) == {"put_call", "iv_extreme", "short_borrow"}
+    assert "self-built IV baseline" in absent["iv_extreme"]
+    assert "short_borrow unavailable" in absent["short_borrow"]
 
 
 def test_html_renders_unavailable_and_has_no_external_dependencies() -> None:
@@ -625,6 +947,70 @@ def _tier_ceiling(tier: str | None) -> float:
     return {"A": 100.0, "B": 81.0, "C": 57.0}[tier]
 
 
+def _required_e_components() -> list[ComponentScore]:
+    """The full required set for class E, so fixtures floor on what they intend to.
+
+    `S_S` joined `REQUIRED_COMPONENTS` for V and E (G5). Without it every fixture here
+    floored to Tier C and reported `missing required component: S_S`, masking the
+    blocked-reason and sort behaviour these tests actually pin.
+    """
+
+    return [
+        ComponentScore(
+            component="S_M",
+            score=0.60,
+            original_weight=0.30,
+            weight_used=0.30,
+            validation_status="verified",
+            source_quality="primary",
+            required=True,
+            as_of=RUN_DATE,
+        ),
+        ComponentScore(
+            component="S_O",
+            score=0.30,
+            original_weight=0.25,
+            weight_used=0.25,
+            validation_status="verified",
+            source_quality="primary",
+            required=True,
+            as_of=RUN_DATE,
+        ),
+        ComponentScore(
+            component="S_S",
+            score=0.20,
+            original_weight=0.20,
+            weight_used=0.20,
+            validation_status="verified",
+            source_quality="primary",
+            required=True,
+            as_of=RUN_DATE,
+        ),
+    ]
+
+
+def _all_components(value: float) -> list[ComponentScore]:
+    return [
+        ComponentScore(
+            component=component,
+            score=value,
+            original_weight=weight,
+            weight_used=weight,
+            validation_status="verified",
+            source_quality="primary",
+            required=component in {"S_M", "S_O"},
+            as_of=RUN_DATE,
+        )
+        for component, weight in {
+            "S_M": 0.30,
+            "S_O": 0.25,
+            "S_S": 0.20,
+            "S_I": 0.15,
+            "S_F": 0.10,
+        }.items()
+    ]
+
+
 def _scenario_table(
     *,
     ticker: str = "NVDA",
@@ -656,6 +1042,17 @@ def _scenario_row(label: str, probability: float) -> ScenarioRow:
         implied_probability=None,
         measured_probability=None,
         source="fixture",
+    )
+
+
+def _invalidation(direction: Direction) -> Invalidation:
+    return Invalidation(
+        direction=direction,
+        basis=InvalidationBasis.MEASURED_SIGMA,
+        description="close below the measured 1 sigma edge at 95.00",
+        lower_level=95.0,
+        conditions=("Quarterly results does not occur",),
+        sources=("measured sigma fixture",),
     )
 
 
