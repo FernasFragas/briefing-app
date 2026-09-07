@@ -352,6 +352,23 @@ class Candidate(BaseModel):
             raise ValueError("value must not be blank")
         return cleaned
 
+    @property
+    def is_index_or_etf(self) -> bool:
+        """True when the candidate is a basket rather than an issuer.
+
+        Ratings, target revisions and Form 4 filings are published *about companies*. An
+        index or fund has no issuer to publish them, which is not a coverage gap that a
+        better provider would close - three providers returned nothing for QQQ and SPY on
+        the 2026-09-03 run, and they were all correct.
+
+        Derived from the instruments the candidate may be expressed in rather than from a
+        new config field, so existing universes need no edit: a fund is tradeable as
+        `etf` and not as `shares`, while an issuer always permits `shares`.
+        """
+
+        permitted = set(self.permitted_instruments)
+        return Instrument.ETF in permitted and Instrument.SHARES not in permitted
+
     @field_validator("permitted_instruments")
     @classmethod
     def _dedupe_instruments(cls, value: list[Instrument]) -> list[Instrument]:

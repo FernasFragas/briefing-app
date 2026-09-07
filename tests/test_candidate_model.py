@@ -155,3 +155,28 @@ def test_candidate_round_trips_through_json() -> None:
     candidate = make_candidate()
     restored = Candidate.model_validate_json(candidate.model_dump_json())
     assert restored == candidate
+
+
+def test_a_fund_is_recognised_by_the_instruments_it_can_be_expressed_in() -> None:
+    """PC3. SPY and QQQ declare `[etf, options]`; every issuer declares `shares`.
+
+    Derived rather than configured, so no existing universe file needs an edit to get the
+    structural-n/a treatment for the legs a basket cannot have.
+    """
+
+    fund = make_candidate(ticker="SPY", permitted_instruments=[Instrument.ETF, Instrument.OPTIONS])
+    issuer = make_candidate(
+        ticker="AAPL", permitted_instruments=[Instrument.SHARES, Instrument.OPTIONS]
+    )
+
+    assert fund.is_index_or_etf is True
+    assert issuer.is_index_or_etf is False
+
+
+def test_an_issuer_that_also_permits_etf_expression_is_still_an_issuer() -> None:
+    """The test is "has no shares", not "mentions etf" - a company remains a company."""
+
+    candidate = make_candidate(
+        ticker="BRK.B", permitted_instruments=[Instrument.SHARES, Instrument.ETF]
+    )
+    assert candidate.is_index_or_etf is False

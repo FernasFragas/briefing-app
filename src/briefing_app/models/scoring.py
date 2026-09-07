@@ -30,6 +30,25 @@ EU_WEIGHTS: dict[str, float] = {"S_M": 0.35, "S_O": 0.30, "S_S": 0.20, "S_I": 0.
 WEIGHTS_BY_PROFILE: dict[str, dict[str, float]] = {"US": US_WEIGHTS, "EU": EU_WEIGHTS}
 
 #: Tiering runs over the required set only. `S` is `P` plus verified borrow evidence.
+#:
+#: `S_S` was added to `V` and `E` on 2026-09-04 and **reverted on 2026-09-06**, because it
+#: cannot do the job it was added for. The intent was to make the tier discriminate: with
+#: `{S_O, S_M}` alone both are verified/primary on every name since the sector-exposure
+#: fix, so the tier floored on nothing and all 21 rows came out Tier A with the ceiling of
+#: 100 binding nothing.
+#:
+#: Requiring `S_S` did not fix that; it moved the constant down one notch. Live run
+#: `daily-2026-09-06-e270378b` returned **0 A / 16 B / 2 C**. The reason is
+#: `_required_component_condition` (`scoring.py`), which floors on *source quality* before
+#: it reads `validation_status`: `aggregator` is in `_DEGRADED_QUALITIES`, and `S_S` is
+#: `aggregator` by construction (`components/sentiment.py` — its legs are vendor news and
+#: analyst aggregates, and sentiment has no primary source). So a `verified` `S_S` still
+#: caps its row at B, and five names on that run proved it. **`S_S` can never qualify a row
+#: for Tier A**, which makes it unusable as the component that gives the tier its spread.
+#:
+#: The tier badge was removed from the graded ideas table instead. Do not re-add `S_S`
+#: here without first changing how `S_S` reports source quality, or the same all-Tier-B
+#: result follows.
 REQUIRED_COMPONENTS: dict[ExpressionClass, frozenset[str]] = {
     ExpressionClass.V: frozenset({"S_O", "S_M"}),
     ExpressionClass.E: frozenset({"S_O", "S_M"}),

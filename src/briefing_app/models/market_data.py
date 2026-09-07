@@ -342,6 +342,51 @@ class NewsSentimentBatch(BaseModel):
     diagnostics: list[DataIssue] = Field(default_factory=list)
 
 
+class PoliticalTrade(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ticker: str
+    chamber: str
+    transaction_date: date_type
+    source: str
+    politician: str | None = None
+    politician_id: str | None = None
+    transaction_type: str | None = None
+    disclosure_date: date_type | None = None
+    amount_range: str | None = None
+    amount_min: float | None = None
+    amount_max: float | None = None
+    owner: str | None = None
+    asset_type: str | None = None
+    district: str | None = None
+    source_url: str | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("ticker")
+    @classmethod
+    def _clean_ticker(cls, value: str) -> str:
+        return value.strip().upper()
+
+
+class RetailMomentumSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ticker: str
+    as_of: date_type
+    source: str
+    mentions: int
+    mentions_24h_ago: int | None = None
+    upvotes: int | None = None
+    rank: int | None = None
+    rank_24h_ago: int | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("ticker")
+    @classmethod
+    def _clean_ticker(cls, value: str) -> str:
+        return value.strip().upper()
+
+
 class PutCallSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
