@@ -17,6 +17,7 @@ from briefing_app.dashboard.models import (
     PerTickerSection,
     PriorScorecardRow,
     RejectedGateRow,
+    RunHealth,
     TacticalDashboard,
     TradingIdeaRow,
 )
@@ -57,6 +58,7 @@ def build_dashboard_payload(
     prior_scorecards: Sequence[Mapping[str, Any]] = (),
     market_overview: Sequence[MarketOverviewPoint | Mapping[str, Any]] = (),
     diagnostics: Sequence[str] = (),
+    run_health: RunHealth | Mapping[str, Any] | None = None,
 ) -> DashboardPayload:
     """Assemble the dashboard sections without recomputing any scores.
 
@@ -91,10 +93,14 @@ def build_dashboard_payload(
         | set(options_by_ticker)
         | set(setup_by_ticker)
     )
+    index_or_fund_tickers = _index_or_fund_tickers(gates)
     idea_tickers = sorted(
-        set(score_by_ticker)
-        | set(setup_by_ticker)
-        | {ticker for ticker, gate in gates.items() if gate.is_scored}
+        (
+            set(score_by_ticker)
+            | set(setup_by_ticker)
+            | {ticker for ticker, gate in gates.items() if gate.is_scored}
+        )
+        - index_or_fund_tickers
     )
     trading_ideas = _trading_ideas(
         tickers=idea_tickers,
@@ -108,9 +114,15 @@ def build_dashboard_payload(
         run_date=run_date,
         generated_at=generated_at,
         data_mode=data_mode,
+        run_health=run_health,
         trading_ideas=trading_ideas,
         prior_scorecard=[_prior_row(row) for row in prior_scorecards],
-        market_overview=[_market_point(point) for point in market_overview],
+        market_overview=_market_overview_points(
+            market_overview=market_overview,
+            index_or_fund_tickers=index_or_fund_tickers,
+            scores=score_by_ticker,
+            options=options_by_ticker,
+        ),
         master_alpha_selection_matrix=[
             _master_row(
                 ticker=ticker,
@@ -155,6 +167,18 @@ def _setup_result_by_ticker(report: SetupReport | None) -> dict[str, CandidateSe
     if report is None:
         return {}
     return {result.ticker: result for result in report.results}
+
+
+def _index_or_fund_tickers(
+    gates: Mapping[str, CandidateGateResult],
+) -> set[str]:
+    """Tickers whose candidate contract says they are baskets, not issuers."""
+
+    return {
+        ticker
+        for ticker, gate in gates.items()
+        if gate.candidate.is_index_or_etf
+    }
 
 
 def _build_evidence_ledger(
@@ -334,6 +358,8 @@ def _trading_ideas(
                 # The direction `compute_grade` branched on, published so a reader can
                 # re-derive `alignment` for bands that do not imply a direction.
                 direction=setup.direction.value if setup is not None else None,
+                posture=score.posture.value if score is not None else None,
+                composite_score=score.s_cte if score is not None else None,
                 grade_letter=grade.letter if grade is not None else None,
                 grade_score=grade.score if grade is not None else None,
                 thesis_probability=(
@@ -366,6 +392,7 @@ def _trading_ideas(
                     )
                 ),
                 grade_penalties=grade.penalties if grade is not None else [],
+                grade_penalty_total=grade.penalty_total if grade is not None else 0.0,
                 headline=_idea_headline(ticker=ticker, setup=setup, status=status),
             )
         )
@@ -488,11 +515,9 @@ def _idea_headline(*, ticker: str, setup: Setup | None, status: str) -> str:
     return f"{ticker} no setup"
 
 
-def _idea_sort_key(row: TradingIdeaRow) -> tuple[int, int, str, bool, float, str]:
+def _idea_sort_key(row: TradingIdeaRow) -> tuple[int, bool, float, str]:
     return (
         _status_sort_rank(row.status),
-        _component_set_rank(row),
-        _component_set_key(row),
         row.grade_score is None,
         -(row.grade_score or 0.0),
         row.ticker,
@@ -506,16 +531,6 @@ def _status_sort_rank(status: str) -> int:
         "BLOCKED": 2,
         "UNSCORED": 3,
     }.get(status, 4)
-
-
-def _component_set_rank(row: TradingIdeaRow) -> int:
-    if not row.scored_components:
-        return 2
-    return 1 if row.missing_components else 0
-
-
-def _component_set_key(row: TradingIdeaRow) -> str:
-    return f"{row.weight_profile or ''}:{','.join(row.scored_components)}"
 
 
 def _dedupe_non_empty(values: Sequence[str | None]) -> list[str]:
@@ -889,6 +904,93 @@ def _market_point(point: MarketOverviewPoint | Mapping[str, Any]) -> MarketOverv
     data = dict(point)
     data["as_of"] = _date_str(data.get("as_of"))
     return MarketOverviewPoint.model_validate(data)
+
+
+def _market_overview_points(
+    *,
+    market_overview: Sequence[MarketOverviewPoint | Mapping[str, Any]],
+    index_or_fund_tickers: set[str],
+    scores: Mapping[str, ScoringResult],
+    options: Mapping[str, OptionsStructureResult],
+) -> list[MarketOverviewPoint]:
+    points = [_market_point(point) for point in market_overview]
+    labels = {point.label for point in points}
+    for ticker in sorted(index_or_fund_tickers):
+        point = _index_market_context_point(
+            ticker=ticker,
+            score=scores.get(ticker),
+            option_structure=options.get(ticker),
+        )
+        if point.label not in labels:
+            points.append(point)
+            labels.add(point.label)
+    return points
+
+
+def _index_market_context_point(
+    *,
+    ticker: str,
+    score: ScoringResult | None,
+    option_structure: OptionsStructureResult | None,
+) -> MarketOverviewPoint:
+    move = _front_expected_move(option_structure)
+    fields: dict[str, Any] = {
+        "spot": _round_or_none(option_structure.spot if option_structure else None),
+        "implied_volatility_pct": _round_or_none(
+            move.iv_atm * 100.0
+            if move is not None and move.iv_atm is not None
+            else None
+        ),
+        "expected_move_pct": _round_or_none(
+            move.straddle_pct * 100.0 if move is not None else None
+        ),
+        "expected_move_points": _round_or_none(
+            move.straddle_points if move is not None else None
+        ),
+        "composite_score": _round_or_none(score.s_cte if score is not None else None),
+        "tier": score.tier.value if score is not None else None,
+    }
+    return MarketOverviewPoint(
+        label=f"{ticker} market context",
+        value=None,
+        fields=fields,
+        source=_index_market_context_source(option_structure),
+        as_of=_date_str(option_structure.as_of) if option_structure is not None else None,
+        note=(
+            "Index/fund candidate shown as market context because baskets have no "
+            "issuer, analyst-coverage, or insider-filing legs."
+        ),
+    )
+
+
+def _front_expected_move(option_structure: OptionsStructureResult | None) -> Any | None:
+    if option_structure is None or not option_structure.expected_moves:
+        return None
+    for label in ("weekly", "monthly"):
+        move = option_structure.expected_moves.get(label)
+        if move is not None:
+            return move
+    return sorted(
+        option_structure.expected_moves.values(),
+        key=lambda move: (move.dte, move.target_dte),
+    )[0]
+
+
+def _index_market_context_source(
+    option_structure: OptionsStructureResult | None,
+) -> str:
+    if option_structure is None:
+        return "dashboard build"
+    sources = _dedupe_non_empty(
+        [str(row.get("source") or "") for row in option_structure.evidence_rows]
+    )
+    if sources:
+        return ", ".join(sources)
+    return "computed options structure"
+
+
+def _round_or_none(value: float | None) -> float | None:
+    return round(value, 4) if value is not None else None
 
 
 def _date_str(value: Any) -> str | None:

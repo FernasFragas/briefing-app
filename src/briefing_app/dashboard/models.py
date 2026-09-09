@@ -23,6 +23,7 @@ class MarketOverviewPoint(BaseModel):
 
     label: str
     value: JsonValue = None
+    fields: dict[str, JsonValue] = Field(default_factory=dict)
     source: str
     as_of: str | None = None
     note: str | None = None
@@ -143,6 +144,25 @@ class PerTickerSection(BaseModel):
     prose: str | None = None
 
 
+class RunHealth(BaseModel):
+    """Completeness summary for the report-level run-health banner.
+
+    The pipeline produces this summary after collecting the run.  It intentionally uses
+    counts for components and names, but provider names, so the dashboard can name an
+    incomplete source rather than reduce a material outage to an opaque percentage.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    components_scored: int
+    components_defined: int
+    names_scored: int
+    names_gated: int
+    providers_answered: list[str] = Field(default_factory=list)
+    providers_expected: list[str] = Field(default_factory=list)
+    total_provider_outage: bool = False
+
+
 class TradingIdeaRow(BaseModel):
     """One graded idea. Python computes the grade; prose layers may only format it.
 
@@ -151,13 +171,9 @@ class TradingIdeaRow(BaseModel):
     `scored_components` names the component set behind the composite so rows scored on
     different denominators are visible in the report.
 
-    `direction` is the direction the grade was actually computed against. It is
-    published because `alignment()` branches on direction, not on thesis band, and the
-    band only implies the direction for `above spot`, `below spot` and `within 1 sigma`.
-    A `beyond +/-1 sigma` row does not: a skew structure carries a real LONG or SHORT
-    direction while publishing the same band as a NEUTRAL straddle, so without this
-    field two rows with identical published fields grade differently and neither is
-    reproducible.
+    `direction` is the declared thesis direction and the direction the grade was computed
+    against. `posture` and `composite_score` are the independent data reading. Publishing
+    both makes a thesis that the data does not support visible without changing the grade.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -165,6 +181,8 @@ class TradingIdeaRow(BaseModel):
     ticker: str
     setup_type: str | None = None
     direction: str | None = None
+    posture: str | None = None
+    composite_score: float | None = None
     grade_letter: str | None = None
     grade_score: float | None = None
     thesis_probability: float | None = None
@@ -178,6 +196,7 @@ class TradingIdeaRow(BaseModel):
     catalyst: dict[str, Any] | None = None
     blocked_reason: str | None = None
     grade_penalties: list[str] = Field(default_factory=list)
+    grade_penalty_total: float = 0.0
     headline: str = ""
 
 
@@ -194,6 +213,9 @@ class DashboardPayload(BaseModel):
     #: builder was not told. Every number below means something different per mode, so it
     #: is recorded rather than inferred from the sources named in the evidence ledger.
     data_mode: str = "unknown"
+    #: Optional for compatibility with existing payloads generated before run health was
+    #: published. A missing summary must not create a report warning by itself.
+    run_health: RunHealth | None = None
     trading_ideas: list[TradingIdeaRow] = Field(default_factory=list)
     prior_scorecard: list[PriorScorecardRow] = Field(default_factory=list)
     market_overview: list[MarketOverviewPoint] = Field(default_factory=list)

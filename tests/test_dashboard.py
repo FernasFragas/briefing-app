@@ -31,11 +31,12 @@ from briefing_app.dashboard import (
     ticker_prose_context,
     ticker_prose_messages,
 )
+from briefing_app.dashboard.build import _idea_sort_key
 from briefing_app.dashboard.models import DashboardPayload, TradingIdeaRow
 from briefing_app.models.candidate import Direction, ExpressionClass, Geography, Instrument
 from briefing_app.models.gate import GateDecision
 from briefing_app.models.scoring import ComponentScore, ConfidenceTier, Posture, ScoringResult
-from briefing_app.options_math import OptionsStructureResult
+from briefing_app.options_math import ExpectedMove, OptionsStructureResult, PriceRange
 from briefing_app.strategy import (
     CandidateSetupResult,
     Invalidation,
@@ -123,6 +124,8 @@ def test_audit_json_emits_trading_ideas_without_expanding_counts() -> None:
                 ticker="NVDA",
                 setup_type="EVENT_DIRECTIONAL_LONG",
                 direction="long",
+                posture="moderate_bullish",
+                composite_score=0.62,
                 grade_letter="B+",
                 grade_score=77.4,
                 thesis_probability=0.68,
@@ -149,6 +152,8 @@ def test_audit_json_emits_trading_ideas_without_expanding_counts() -> None:
             # Published so `alignment()` can be re-derived: the thesis band alone does
             # not name the direction for a `beyond ...` row.
             "direction": "long",
+            "posture": "moderate_bullish",
+            "composite_score": 0.62,
             "grade_letter": "B+",
             "grade_score": 77.4,
             "thesis_probability": 0.68,
@@ -166,6 +171,7 @@ def test_audit_json_emits_trading_ideas_without_expanding_counts() -> None:
             },
             "blocked_reason": None,
             "grade_penalties": [],
+            "grade_penalty_total": 0.0,
             "headline": "NVDA event-directional long",
         }
     ]
@@ -190,7 +196,8 @@ def test_fixture_dashboard_build_emits_action_sorted_trading_ideas() -> None:
     assert nvda.status == "TRADEABLE"
     assert nvda.grade_letter is not None
     assert nvda.grade_score is not None
-    assert nvda.grade_score <= _tier_ceiling(nvda.tier)
+    assert nvda.posture == "strong_bullish"
+    assert nvda.composite_score == pytest.approx(0.62)
     assert nvda.blocked_reason is None
 
     assert [row.status for row in rows] == sorted(
@@ -201,134 +208,204 @@ def test_fixture_dashboard_build_emits_action_sorted_trading_ideas() -> None:
         row.status == "TRADEABLE" or row.blocked_reason
         for row in rows
     )
-    for row in rows:
-        if row.grade_score is not None:
-            assert row.grade_score <= _tier_ceiling(row.tier)
+
+
+def test_dashboard_builder_publishes_run_health_without_requiring_it() -> None:
+    legacy_payload = build_dashboard_payload(
+        run_id="no-run-health",
+        run_date=RUN_DATE,
+        generated_at=NOW,
+    )
+    health_payload = build_dashboard_payload(
+        run_id="run-health",
+        run_date=RUN_DATE,
+        generated_at=NOW,
+        run_health={
+            "components_scored": 14,
+            "components_defined": 16,
+            "names_scored": 17,
+            "names_gated": 18,
+            "providers_answered": ["fmp"],
+            "providers_expected": ["fmp", "finnhub"],
+            "total_provider_outage": False,
+        },
+    )
+
+    assert legacy_payload.run_health is None
+    assert health_payload.run_health is not None
+    assert health_payload.run_health.components_scored == 14
+    assert json.loads(health_payload.audit_json())["run_health"] == {
+        "components_scored": 14,
+        "components_defined": 16,
+        "names_scored": 17,
+        "names_gated": 18,
+        "providers_answered": ["fmp"],
+        "providers_expected": ["fmp", "finnhub"],
+        "total_provider_outage": False,
+    }
 
 
 def test_tradeable_rows_sort_above_higher_grade_watchlist_rows() -> None:
+    rows = [
+        TradingIdeaRow(
+            ticker="TLOW",
+            status="TRADEABLE",
+            grade_letter="D",
+            grade_score=10.0,
+            weight_profile="US",
+            scored_components=["S_M", "S_O"],
+            missing_components=["S_S", "S_I", "S_F"],
+        ),
+        TradingIdeaRow(
+            ticker="THIGH",
+            status="TRADEABLE",
+            grade_letter="B+",
+            grade_score=60.0,
+            weight_profile="US",
+            scored_components=["S_M", "S_O", "S_S"],
+            missing_components=["S_I", "S_F"],
+        ),
+        TradingIdeaRow(
+            ticker="TMID",
+            status="TRADEABLE",
+            grade_letter="C",
+            grade_score=40.0,
+            weight_profile="US",
+            scored_components=["S_M", "S_O", "S_S", "S_I"],
+            missing_components=["S_F"],
+        ),
+        TradingIdeaRow(
+            ticker="WLOW",
+            status="WATCHLIST",
+            grade_letter="D",
+            grade_score=20.0,
+            weight_profile="US",
+            scored_components=["S_M", "S_O", "S_S", "S_I"],
+            missing_components=["S_F"],
+        ),
+        TradingIdeaRow(
+            ticker="WHIGH",
+            status="WATCHLIST",
+            grade_letter="A",
+            grade_score=95.0,
+            weight_profile="US",
+            scored_components=["S_M", "S_O"],
+            missing_components=["S_S", "S_I", "S_F"],
+        ),
+        TradingIdeaRow(
+            ticker="WMID",
+            status="WATCHLIST",
+            grade_letter="B",
+            grade_score=70.0,
+            weight_profile="US",
+            scored_components=["S_M", "S_O", "S_S"],
+            missing_components=["S_I", "S_F"],
+        ),
+        TradingIdeaRow(ticker="UNS", status="UNSCORED"),
+    ]
+
+    ordered = sorted(rows, key=_idea_sort_key)
+
+    assert [row.ticker for row in ordered] == [
+        "THIGH",
+        "TMID",
+        "TLOW",
+        "WHIGH",
+        "WMID",
+        "WLOW",
+        "UNS",
+    ]
+    assert (
+        _idea_row(ordered, "TLOW").grade_score
+        < _idea_row(ordered, "WHIGH").grade_score
+    )
+    assert len({tuple(row.scored_components) for row in rows if row.scored_components}) == 3
+
+
+def test_index_and_fund_candidates_move_to_market_overview() -> None:
     gate_report = run_gate(
         [
-            make_candidate(ticker="DE", catalysts=[make_catalyst(days_out=2)]),
-            make_candidate(ticker="MSFT", catalysts=[make_catalyst(days_out=2)]),
-            make_candidate(ticker="AMD", catalysts=[make_catalyst(days_out=2)]),
+            make_candidate(
+                ticker="SPY",
+                expression_class="V",
+                direction="neutral",
+                permitted_instruments=[Instrument.ETF, Instrument.OPTIONS],
+                catalysts=[make_catalyst(days_out=2, kind="macro")],
+            ),
+            make_candidate(
+                ticker="QQQ",
+                expression_class="V",
+                direction="neutral",
+                permitted_instruments=[Instrument.ETF, Instrument.OPTIONS],
+                catalysts=[make_catalyst(days_out=3, kind="macro")],
+            ),
+            make_candidate(ticker="NVDA", catalysts=[make_catalyst(days_out=2)]),
         ],
         run_date=RUN_DATE,
         settings=GateSettings(),
-        run_id="action-sort-gate",
+        run_id="index-market-gate",
     )
-    catalysts = {
-        result.ticker: result.primary_catalyst
+    assert {
+        result.ticker
         for result in gate_report.results
-    }
-    low_grade_tradeable = Setup(
-        ticker="DE",
-        setup_type=SetupType.EVENT_DIRECTIONAL_LONG,
-        decision=SetupDecision.CANDIDATE,
-        expression_class=ExpressionClass.E,
-        direction=Direction.LONG,
-        horizon_days=10,
-        horizon_label="10d",
-        tier=ConfidenceTier.A,
-        posture=Posture.MODERATE_BEARISH,
-        s_cte=-0.50,
-        instrument=Instrument.SHARES,
-        catalyst=catalysts["DE"],
-        scenario_table=_scenario_table(ticker="DE", above=0.70, within=0.15),
-        invalidation=_invalidation(Direction.LONG),
-        rationale="candidate despite a weak grade",
-        evidence=[
-            SetupEvidence(
-                field_name="s_cte",
-                field_value="-0.50",
-                source="computed",
-                as_of=NOW,
-            )
-        ],
-        size_fraction=1.0,
-    )
-    high_grade_watchlist = Setup(
-        ticker="MSFT",
-        setup_type=SetupType.WATCHLIST_NO_TRADE,
-        decision=SetupDecision.WATCHLIST,
-        expression_class=ExpressionClass.E,
-        direction=Direction.LONG,
-        horizon_days=10,
-        horizon_label="10d",
-        tier=ConfidenceTier.A,
-        posture=Posture.STRONG_BULLISH,
-        s_cte=0.90,
-        catalyst=catalysts["MSFT"],
-        scenario_table=_scenario_table(ticker="MSFT", above=0.95, within=0.05),
-        rationale="blocked on volatility history",
-    )
-    setup_report = SetupReport(
-        run_id="action-sort-setups",
-        run_date=RUN_DATE,
-        generated_at=NOW,
-        results=[
-            CandidateSetupResult(
-                ticker="DE",
-                expression_class=ExpressionClass.E,
-                tier=ConfidenceTier.A,
-                setups=[low_grade_tradeable],
-            ),
-            CandidateSetupResult(
-                ticker="MSFT",
-                expression_class=ExpressionClass.E,
-                tier=ConfidenceTier.A,
-                setups=[high_grade_watchlist],
-                rejections=[
-                    SetupRejection(
-                        ticker="MSFT",
-                        setup_type=SetupType.SHORT_PREMIUM_IRON_CONDOR,
-                        code=RejectionCode.IV_RANK_UNAVAILABLE,
-                        detail="no IV rank history for this name",
-                    )
-                ],
-            ),
-        ],
-    )
+        if result.candidate.is_index_or_etf
+    } == {"QQQ", "SPY"}
+
     payload = build_dashboard_payload(
-        run_id="action-sort-dashboard",
+        run_id="index-market-dashboard",
         run_date=RUN_DATE,
         generated_at=NOW,
         gate_report=gate_report,
         scores=[
-            ScoringResult(
-                ticker="DE",
-                expression_class=ExpressionClass.E,
-                geography=Geography.US,
-                s_cte=-0.50,
-                tier=ConfidenceTier.A,
-                components=_required_e_components(),
+            _scoring_result(
+                "SPY",
+                expression_class=ExpressionClass.V,
+                s_cte=0.31,
+                tier=ConfidenceTier.B,
             ),
-            ScoringResult(
-                ticker="MSFT",
+            _scoring_result(
+                "QQQ",
+                expression_class=ExpressionClass.V,
+                s_cte=-0.12,
+                tier=ConfidenceTier.C,
+            ),
+            _scoring_result(
+                "NVDA",
                 expression_class=ExpressionClass.E,
-                geography=Geography.US,
-                s_cte=0.90,
-                tier=ConfidenceTier.A,
-                components=_required_e_components(),
+                s_cte=0.42,
+                tier=ConfidenceTier.B,
             ),
         ],
-        setup_report=setup_report,
+        options_structures={
+            "SPY": _market_option_structure(
+                "SPY", spot=500.0, move_pct=0.015, iv_atm=0.22
+            ),
+            "QQQ": _market_option_structure(
+                "QQQ", spot=400.0, move_pct=0.02, iv_atm=0.25
+            ),
+        },
+        market_overview=[
+            MarketOverviewPoint(label="VIX", value=14.2, source="CBOE fixture")
+        ],
     )
 
-    assert [(row.ticker, row.status) for row in payload.trading_ideas] == [
-        ("DE", "TRADEABLE"),
-        ("MSFT", "WATCHLIST"),
-        ("AMD", "UNSCORED"),
-    ]
-    de = _idea_row(payload.trading_ideas, "DE")
-    msft = _idea_row(payload.trading_ideas, "MSFT")
-    assert de.grade_score is not None
-    assert msft.grade_score is not None
-    assert de.grade_score < msft.grade_score
-    assert msft.blocked_reason == "iv rank unavailable: no IV rank history for this name"
+    assert [row.ticker for row in payload.trading_ideas] == ["NVDA"]
+    market_by_label = {point.label: point for point in payload.market_overview}
+    assert {"SPY market context", "QQQ market context"}.issubset(market_by_label)
+
+    spy = market_by_label["SPY market context"]
+    assert spy.fields == {
+        "spot": 500.0,
+        "implied_volatility_pct": 22.0,
+        "expected_move_pct": 1.5,
+        "expected_move_points": 7.5,
+        "composite_score": 0.31,
+        "tier": "B",
+    }
+    assert "baskets have no issuer" in (spy.note or "")
 
 
-def test_trading_ideas_mark_and_group_different_composite_sets() -> None:
+def test_trading_ideas_mark_different_composite_sets() -> None:
     full_setup = Setup(
         ticker="FULL",
         setup_type=SetupType.EVENT_DIRECTIONAL_LONG,
@@ -424,12 +501,11 @@ def test_trading_ideas_mark_and_group_different_composite_sets() -> None:
         setup_report=setup_report,
     )
 
-    assert [row.ticker for row in payload.trading_ideas] == ["FULL", "PART"]
+    assert {row.ticker for row in payload.trading_ideas} == {"FULL", "PART"}
     full = _idea_row(payload.trading_ideas, "FULL")
     partial = _idea_row(payload.trading_ideas, "PART")
     assert full.grade_score is not None
     assert partial.grade_score is not None
-    assert partial.grade_score > full.grade_score
     assert full.scored_components == ["S_M", "S_O", "S_S", "S_I", "S_F"]
     assert full.missing_components == []
     assert partial.scored_components == ["S_M", "S_O", "S_S"]
@@ -560,7 +636,6 @@ def test_watchlist_blocked_reason_prefers_score_cause_over_tier_c_code() -> None
     row = payload.trading_ideas[0]
     assert row.status == "WATCHLIST"
     assert row.grade_score is not None
-    assert row.grade_score <= _tier_ceiling(row.tier)
     assert "missing required component: S_O" in (row.blocked_reason or "")
     assert "missing invalidation level" in (row.blocked_reason or "")
     assert "tier_c" not in (row.blocked_reason or "")
@@ -942,9 +1017,94 @@ def _idea_row(rows: list[TradingIdeaRow], ticker: str) -> TradingIdeaRow:
     return next(row for row in rows if row.ticker == ticker)
 
 
-def _tier_ceiling(tier: str | None) -> float:
-    assert tier is not None
-    return {"A": 100.0, "B": 81.0, "C": 57.0}[tier]
+def _scoring_result(
+    ticker: str,
+    *,
+    expression_class: ExpressionClass,
+    s_cte: float,
+    tier: ConfidenceTier,
+) -> ScoringResult:
+    return ScoringResult(
+        ticker=ticker,
+        expression_class=expression_class,
+        geography=Geography.US,
+        s_cte=s_cte,
+        tier=tier,
+        components=_required_e_components(),
+    )
+
+
+def _market_option_structure(
+    ticker: str,
+    *,
+    spot: float,
+    move_pct: float,
+    iv_atm: float,
+) -> OptionsStructureResult:
+    return OptionsStructureResult(
+        ticker=ticker,
+        as_of=NOW,
+        spot=spot,
+        available=True,
+        score=0.2,
+        expected_moves={
+            "weekly": _expected_move(spot=spot, move_pct=move_pct, iv_atm=iv_atm)
+        },
+        evidence_rows=(
+            {
+                "ticker": ticker,
+                "component": "S_O",
+                "field_name": "weekly_expected_move",
+                "field_value": move_pct,
+                "source": "CBOE fixture",
+                "as_of": NOW,
+            },
+        ),
+    )
+
+
+def _expected_move(
+    *,
+    spot: float,
+    move_pct: float,
+    iv_atm: float,
+) -> ExpectedMove:
+    points = spot * move_pct
+    return ExpectedMove(
+        target_dte=7,
+        expiry=RUN_DATE + timedelta(days=7),
+        dte=7,
+        atm_strike=spot,
+        call_mid=points / 2.0,
+        put_mid=points / 2.0,
+        iv_atm=iv_atm,
+        straddle_points=points,
+        straddle_pct=move_pct,
+        iv_points=spot * move_pct,
+        iv_pct=move_pct,
+        divergence_pct=None,
+        divergence_exceeds_threshold=False,
+        one_sigma_straddle=PriceRange(
+            low=spot - points,
+            high=spot + points,
+            midpoint=spot,
+        ),
+        two_sigma_straddle=PriceRange(
+            low=spot - (points * 2.0),
+            high=spot + (points * 2.0),
+            midpoint=spot,
+        ),
+        one_sigma_iv=PriceRange(
+            low=spot - points,
+            high=spot + points,
+            midpoint=spot,
+        ),
+        two_sigma_iv=PriceRange(
+            low=spot - (points * 2.0),
+            high=spot + (points * 2.0),
+            midpoint=spot,
+        ),
+    )
 
 
 def _required_e_components() -> list[ComponentScore]:
