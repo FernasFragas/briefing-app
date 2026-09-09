@@ -5,11 +5,12 @@ services:
       dockerfile: Dockerfile
     environment:
       APP_ENV: ${APP_ENV:-development}
-      APP_RUN_TOKEN: ${APP_RUN_TOKEN:-dev-token}
-      BRIEFING_CONFIG_PATH: ${BRIEFING_CONFIG_PATH:-/app/config/config.example.yaml}
-      BRIEFING_SOURCE_REGISTRY_PATH: ${BRIEFING_SOURCE_REGISTRY_PATH:-/app/config/source_registry.yaml}
-      BRIEFING_DATA_DIR: ${BRIEFING_DATA_DIR:-/app/data}
-      BRIEFING_OUTPUT_DIR: ${BRIEFING_OUTPUT_DIR:-/app/output}
+      APP_RUN_TOKEN: ${APP_RUN_TOKEN:-}
+      APP_RUN_TOKEN_FILE: ${APP_RUN_TOKEN_FILE:-data/ops/run-token}
+      BRIEFING_CONFIG_PATH: ${BRIEFING_CONFIG_PATH:-config/config.example.yaml}
+      BRIEFING_SOURCE_REGISTRY_PATH: ${BRIEFING_SOURCE_REGISTRY_PATH:-config/source_registry.yaml}
+      BRIEFING_DATA_DIR: ${BRIEFING_DATA_DIR:-data}
+      BRIEFING_OUTPUT_DIR: ${BRIEFING_OUTPUT_DIR:-output}
       BRIEFING_HTTP_TIMEOUT_SECONDS: ${BRIEFING_HTTP_TIMEOUT_SECONDS:-10}
       BRIEFING_USER_AGENT: ${BRIEFING_USER_AGENT:-briefing-app/0.1 contact@example.com}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-briefing}:${POSTGRES_PASSWORD:-briefing_dev}@postgres:5432/${POSTGRES_DB:-briefing}
@@ -18,12 +19,12 @@ services:
       FMP_API_KEY: ${FMP_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss:120b}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./config:/app/config:ro
       - ./data:/app/data
@@ -47,7 +48,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-briefing_dev}
       POSTGRES_DB: ${POSTGRES_DB:-briefing}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d:ro
@@ -133,6 +134,7 @@ services:
     restart: unless-stopped
 
   n8n:
+    # Optional/manual workflow runner. The shipped local scheduler is launchd via ops/.
     image: docker.n8n.io/n8nio/n8n:latest
     environment:
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Europe/Lisbon}
@@ -148,11 +150,11 @@ services:
       APP_RUN_URL: ${APP_RUN_URL:-http://app:8000/run/daily}
       APP_DAILY_RUN_URL: ${APP_DAILY_RUN_URL:-http://app:8000/run/daily}
       APP_WEEKLY_RUN_URL: ${APP_WEEKLY_RUN_URL:-http://app:8000/run/weekly}
-      APP_RUN_TOKEN: ${APP_RUN_TOKEN:-dev-token}
+      APP_RUN_TOKEN: ${APP_RUN_TOKEN:-}
       STATIC_DELIVERY_URL: ${STATIC_DELIVERY_URL:-http://app:8000/delivery/static}
       MARKET_HOLIDAYS: ${MARKET_HOLIDAYS:-}
     ports:
-      - "5678:5678"
+      - "127.0.0.1:5678:5678"
     volumes:
       - n8n_data:/home/node/.n8n
       - ./output:/output:ro

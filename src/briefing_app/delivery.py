@@ -1,4 +1,4 @@
-"""Delivery adapters used by the n8n workflow (T11)."""
+"""Delivery adapters used by local jobs and optional workflow runners."""
 
 from __future__ import annotations
 
