@@ -14,6 +14,7 @@ universe:
     - watchlist.example.csv
   fixed_min: 8
   # Raised 12 -> 15 on 2026-08-31 for INTC, CRWV, AMAT, RHM.DE, LDO.MI.
+  # Inactive EU deferral markers do not count toward the loaded fixed universe.
   fixed_max: 15
   screen_min: 15
   screen_max: 30

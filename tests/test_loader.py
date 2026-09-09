@@ -6,6 +6,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+import yaml
 
 from briefing_app.config import (
     AppConfig,
@@ -207,6 +208,75 @@ candidates:
     assert "WORSE" in result.errors[1]
 
 
+def test_inactive_yaml_entry_is_skipped_before_candidate_validation(tmp_path: Path) -> None:
+    (tmp_path / "fixed.yaml").write_text(
+        """
+candidates:
+  - ticker: RHM.DE
+    inactive: true
+    inactive_reason: EU option-chain coverage deferred.
+  - ticker: NVDA
+    thesis: Active name.
+    catalysts: []
+""",
+        encoding="utf-8",
+    )
+
+    result = load_candidate_file(
+        tmp_path / "fixed.yaml", defaults=CandidateDefaults(), source=CandidateSource.SCREEN
+    )
+
+    assert result.errors == []
+    assert [candidate.ticker for candidate in result.candidates] == ["NVDA"]
+    assert result.inactive_tickers == {"RHM.DE": "EU option-chain coverage deferred."}
+
+
+def test_inactive_yaml_entry_requires_reason_in_candidate_loader(tmp_path: Path) -> None:
+    (tmp_path / "fixed.yaml").write_text(
+        """
+candidates:
+  - ticker: RHM.DE
+    inactive: true
+""",
+        encoding="utf-8",
+    )
+
+    result = load_candidate_file(
+        tmp_path / "fixed.yaml", defaults=CandidateDefaults(), source=CandidateSource.SCREEN
+    )
+
+    assert result.candidates == []
+    assert "inactive_reason" in result.errors[0]
+
+
+def test_load_config_rejects_inactive_candidate_file_entry_without_reason(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "fixed.yaml").write_text(
+        """
+candidates:
+  - ticker: RHM.DE
+    inactive: true
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "config.yaml").write_text(
+        """
+universe:
+  mode: fixed
+  fixed_files: [fixed.yaml]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(tmp_path / "config.yaml")
+
+    message = str(excinfo.value)
+    assert "inactive" in message
+    assert "inactive_reason" in message
+
+
 def test_missing_file_raises(tmp_path: Path) -> None:
     with pytest.raises(UniverseLoadError):
         load_candidate_file(
@@ -286,6 +356,59 @@ candidate_defaults:
     assert [c.ticker for c in result.candidates] == ["NVDA", "NVDA", "AMD"]
     assert result.candidates[0].source is CandidateSource.FIXED_UNIVERSE
     assert result.candidates[1].source is CandidateSource.SCREEN
+
+
+def test_load_universe_suppresses_inactive_tickers_across_sources(tmp_path: Path) -> None:
+    (tmp_path / "fixed.yaml").write_text(
+        """
+candidates:
+  - ticker: RHM.DE
+    inactive: true
+    inactive_reason: EU option-chain coverage deferred.
+  - ticker: NVDA
+    thesis: Active fixed name.
+    catalysts: []
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "screen.yaml").write_text(
+        """
+candidates:
+  - ticker: RHM.DE
+    thesis: Active duplicate that should be suppressed.
+    catalysts: []
+  - ticker: AMD
+    thesis: Active screen name.
+    catalysts: []
+""",
+        encoding="utf-8",
+    )
+    config = write_config(
+        tmp_path,
+        """
+universe:
+  mode: both
+  fixed_files: [fixed.yaml]
+  candidate_files: [screen.yaml]
+  fixed_min: 0
+  screen_min: 0
+candidate_defaults:
+  thesis: Watched name.
+""",
+    )
+
+    result = load_universe(config)
+
+    assert [candidate.ticker for candidate in result.candidates] == ["NVDA", "AMD"]
+    assert result.inactive_tickers == {"RHM.DE": "EU option-chain coverage deferred."}
+
+
+def test_example_fixed_universe_has_no_duplicate_tickers() -> None:
+    payload = yaml.safe_load(Path("config/universe.example.yaml").read_text(encoding="utf-8"))
+    tickers = [str(record["ticker"]).upper() for record in payload["candidates"]]
+    duplicates = sorted({ticker for ticker in tickers if tickers.count(ticker) > 1})
+
+    assert duplicates == []
 
 
 def test_mode_override_beats_the_configured_mode(tmp_path: Path) -> None:

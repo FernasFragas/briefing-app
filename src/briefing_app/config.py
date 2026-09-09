@@ -32,6 +32,10 @@ from briefing_app.models.candidate import (
 )
 
 DEFAULT_CONFIG_PATHS: tuple[str, ...] = ("config/config.yaml", "config/config.example.yaml")
+_TRUTHY_VALUES = {"1", "true", "yes", "y"}
+_YAML_SUFFIXES = {".yaml", ".yml"}
+_INACTIVE_FIELD = "inactive"
+_INACTIVE_REASON_FIELD = "inactive_reason"
 
 ProviderName = Literal[
     "alpha_vantage",
@@ -92,6 +96,14 @@ class UniverseSettings(BaseModel):
     fixed_max: int = Field(default=12, ge=0)
     screen_min: int = Field(default=15, ge=0)
     screen_max: int = Field(default=30, ge=0)
+
+    @field_validator("fixed")
+    @classmethod
+    def _inactive_inline_entries_require_reason(cls, value: list[Any]) -> list[Any]:
+        missing = _inactive_reason_errors(value, "universe.fixed")
+        if missing:
+            raise ValueError("; ".join(missing))
+        return value
 
 
 class GateSettings(BaseModel):
@@ -406,6 +418,59 @@ class AppConfig(BaseModel):
         return self.base_dir / path
 
 
+def _is_truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in _TRUTHY_VALUES
+
+
+def _inactive_reason_errors(records: list[Any], origin: str) -> list[str]:
+    errors: list[str] = []
+    for index, record in enumerate(records, start=1):
+        if not isinstance(record, dict):
+            continue
+        if not _is_truthy(record.get(_INACTIVE_FIELD)):
+            continue
+        reason = record.get(_INACTIVE_REASON_FIELD)
+        if isinstance(reason, str) and reason.strip():
+            continue
+        ticker = str(record.get("ticker") or f"entry {index}").strip().upper()
+        errors.append(
+            f"{origin}: {ticker} sets `{_INACTIVE_FIELD}` but is missing "
+            f"`{_INACTIVE_REASON_FIELD}`"
+        )
+    return errors
+
+
+def _candidate_records_from_payload(payload: Any) -> list[Any]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("candidates", "universe", "tickers"):
+            records = payload.get(key)
+            if isinstance(records, list):
+                return records
+    return []
+
+
+def _inactive_reason_errors_from_file(path: Path) -> list[str]:
+    if path.suffix.lower() not in _YAML_SUFFIXES or not path.exists():
+        return []
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return []
+    return _inactive_reason_errors(_candidate_records_from_payload(payload), str(path))
+
+
+def _validate_inactive_entries(config: AppConfig, config_path: Path) -> None:
+    errors = _inactive_reason_errors(config.universe.fixed, "universe.fixed")
+    for raw_path in [*config.universe.fixed_files, *config.universe.candidate_files]:
+        errors.extend(_inactive_reason_errors_from_file(config.resolve_path(raw_path)))
+    if errors:
+        raise ConfigError(f"Invalid config {config_path}: " + "; ".join(errors))
+
+
 def find_config_path(explicit: str | Path | None = None) -> Path:
     if explicit:
         path = Path(explicit)
@@ -452,6 +517,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     except ValidationError as exc:
         raise ConfigError(f"Invalid config {config_path}: {exc}") from exc
     config._config_path = config_path.resolve()
+    _validate_inactive_entries(config, config_path)
     return config
 
 

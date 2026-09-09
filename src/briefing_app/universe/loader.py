@@ -52,6 +52,9 @@ _CSV_CATALYST_FIELDS: dict[str, str] = {
 
 _LIST_SEPARATOR = "|"
 _TRUTHY = {"1", "true", "yes", "y"}
+_INACTIVE_FIELD = "inactive"
+_INACTIVE_REASON_FIELD = "inactive_reason"
+_POLICY_FIELDS = frozenset({_INACTIVE_FIELD, _INACTIVE_REASON_FIELD})
 
 
 class UniverseLoadError(RuntimeError):
@@ -65,11 +68,13 @@ class LoadResult:
     candidates: list[Candidate] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    inactive_tickers: dict[str, str] = field(default_factory=dict)
 
     def extend(self, other: LoadResult) -> None:
         self.candidates.extend(other.candidates)
         self.warnings.extend(other.warnings)
         self.errors.extend(other.errors)
+        self.inactive_tickers.update(other.inactive_tickers)
 
 
 def _split_list(value: Any) -> list[str] | None:
@@ -88,6 +93,50 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in _TRUTHY
+
+
+def _ticker_label(record: dict[str, Any]) -> str:
+    ticker = record.get("ticker")
+    return str(ticker).strip().upper() if ticker not in (None, "") else "<no ticker>"
+
+
+def _inactive_reason(record: dict[str, Any]) -> str | None:
+    reason = record.get(_INACTIVE_REASON_FIELD)
+    if not isinstance(reason, str):
+        return None
+    cleaned = reason.strip()
+    return cleaned or None
+
+
+def _strip_policy_fields(record: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in record.items() if key not in _POLICY_FIELDS}
+
+
+def _register_inactive_record(
+    record: dict[str, Any], *, index: int, origin: str, result: LoadResult
+) -> bool:
+    if not _as_bool(record.get(_INACTIVE_FIELD)):
+        return False
+
+    ticker = _ticker_label(record)
+    reason = _inactive_reason(record)
+    if ticker == "<no ticker>":
+        result.errors.append(
+            f"{origin}: entry {index} is inactive but has no ticker to suppress."
+        )
+        return True
+    if reason is None:
+        result.errors.append(
+            f"{origin}: entry {index} {ticker} is inactive but missing "
+            f"`{_INACTIVE_REASON_FIELD}`."
+        )
+        return True
+
+    result.inactive_tickers[ticker] = reason
+    result.candidates = [
+        candidate for candidate in result.candidates if candidate.ticker != ticker
+    ]
+    return True
 
 
 def _apply_defaults(record: dict[str, Any], defaults: CandidateDefaults) -> dict[str, Any]:
@@ -155,6 +204,11 @@ def load_candidates_from_records(
         if not isinstance(record, dict):
             result.errors.append(f"{origin}: entry {index} is not a mapping or ticker string.")
             continue
+        if _register_inactive_record(record, index=index, origin=origin, result=result):
+            continue
+        record = _strip_policy_fields(record)
+        if _ticker_label(record) in result.inactive_tickers:
+            continue
         candidate = _build_candidate(
             record, defaults=defaults, source=source, origin=origin, result=result
         )
@@ -220,6 +274,20 @@ def load_candidates_from_csv(
         if not ticker:
             result.errors.append(f"{origin}:{line_number}: row has no ticker.")
             continue
+        if _as_bool(cleaned.get(_INACTIVE_FIELD)):
+            reason = _inactive_reason(cleaned)
+            if reason is None:
+                result.errors.append(
+                    f"{origin}:{line_number}: {ticker} is inactive but missing "
+                    f"`{_INACTIVE_REASON_FIELD}`."
+                )
+            else:
+                result.inactive_tickers[ticker] = reason
+                records.pop(ticker, None)
+                order = [existing for existing in order if existing != ticker]
+            continue
+        if ticker in result.inactive_tickers:
+            continue
 
         catalyst = _catalyst_from_row(cleaned)
         if ticker in records:
@@ -229,7 +297,12 @@ def load_candidates_from_csv(
 
         record: dict[str, Any] = {"ticker": ticker, "catalysts": []}
         for key, value in cleaned.items():
-            if key in _CSV_CATALYST_FIELDS or key == "ticker" or value in (None, ""):
+            if (
+                key in _CSV_CATALYST_FIELDS
+                or key in _POLICY_FIELDS
+                or key == "ticker"
+                or value in (None, "")
+            ):
                 continue
             if key in {"permitted_instruments", "tags"}:
                 record[key] = _split_list(value)
@@ -353,6 +426,13 @@ def load_universe(config: AppConfig, mode: str | None = None) -> LoadResult:
         result.extend(load_fixed_universe(config))
     if effective_mode in {"screen", "both"}:
         result.extend(load_screen_candidates(config))
+
+    if result.inactive_tickers:
+        result.candidates = [
+            candidate
+            for candidate in result.candidates
+            if candidate.ticker not in result.inactive_tickers
+        ]
 
     if not result.candidates:
         result.warnings.append(

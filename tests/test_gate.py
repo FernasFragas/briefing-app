@@ -8,8 +8,8 @@ from datetime import date, timedelta
 
 import pytest
 
-from briefing_app.config import GateSettings
-from briefing_app.models.candidate import ExpressionClass, Instrument
+from briefing_app.config import CandidateDefaults, GateSettings
+from briefing_app.models.candidate import CandidateSource, ExpressionClass, Instrument
 from briefing_app.models.gate import (
     GateDecision,
     GateFlagCode,
@@ -17,6 +17,7 @@ from briefing_app.models.gate import (
     to_candidate_gate_rows,
 )
 from briefing_app.universe.gate import evaluate_candidate, run_gate
+from briefing_app.universe.loader import load_candidate_file
 from briefing_app.universe.store import RejectionRecord
 from tests.conftest import RUN_DATE, make_candidate, make_catalyst
 
@@ -439,3 +440,32 @@ def test_run_id_and_load_diagnostics_are_carried_on_the_report(settings) -> None
     assert report.run_date == RUN_DATE
     assert report.load_warnings == ["only 1 candidate"]
     assert report.load_errors == ["bad row 7"]
+
+
+def test_inactive_entries_are_skipped_before_gate_evaluation(tmp_path, settings) -> None:
+    path = tmp_path / "fixed.yaml"
+    path.write_text(
+        """
+candidates:
+  - ticker: RHM.DE
+    inactive: true
+    inactive_reason: EU option-chain coverage deferred.
+  - ticker: NVDA
+    thesis: Active name.
+    catalysts:
+      - name: Quarterly results
+        date: 2026-09-01
+        status: confirmed
+""",
+        encoding="utf-8",
+    )
+    loaded = load_candidate_file(
+        path,
+        defaults=CandidateDefaults(),
+        source=CandidateSource.FIXED_UNIVERSE,
+    )
+
+    report = run_gate(loaded.candidates, run_date=RUN_DATE, settings=settings)
+
+    assert [result.ticker for result in report.results] == ["NVDA"]
+    assert [result.ticker for result in report.gated_out] == []
