@@ -5,6 +5,7 @@ import argparse
 import json
 import sys
 
+from briefing_app.backfill import run_iv_backfill
 from briefing_app.config import ConfigError, load_config
 from briefing_app.models.gate import to_candidate_gate_rows
 from briefing_app.pipeline import (
@@ -104,6 +105,34 @@ def run_pipeline_command(args: argparse.Namespace, *, run_type: str) -> int:
     return 0
 
 
+def run_backfill_iv_command(args: argparse.Namespace) -> int:
+    try:
+        config = load_config(args.config)
+        output = run_iv_backfill(
+            config,
+            tickers=args.ticker,
+            run_date=args.run_date,
+            end_date=args.end_date,
+            start_date=args.start_date,
+            sessions=args.sessions,
+            data_dir=args.data_dir,
+            dry_run=args.dry_run,
+            cache_only=args.cache_only,
+            max_requests=args.max_requests,
+            live_run_reserve=args.live_run_reserve,
+            allow_vendor_splice=args.allow_vendor_splice,
+        )
+    except (ConfigError, UniverseLoadError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(json.dumps(output.to_dict(), indent=2, sort_keys=True))
+    if output.blocked_reason is not None:
+        print(f"blocked: {output.blocked_reason}", file=sys.stderr)
+        return 1
+    return 1 if output.failed and not output.budget_exhausted else 0
+
+
 def _parse_date(value: str) -> date:
     try:
         return date.fromisoformat(value)
@@ -141,6 +170,76 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     preflight.set_defaults(func=run_preflight_command)
+
+    backfill = subparsers.add_parser(
+        "backfill-iv",
+        help="Replay historical option chains into the self-built IV baseline store.",
+    )
+    backfill.add_argument("--config", help="Path to config.yaml (default: BRIEFING_CONFIG_PATH).")
+    backfill.add_argument(
+        "--ticker",
+        action="append",
+        help=(
+            "Ticker to backfill. Repeat or comma-separate; default is gate-accepted "
+            "US tickers for the run date."
+        ),
+    )
+    backfill.add_argument(
+        "--run-date",
+        type=_parse_date,
+        help="Backfill bookkeeping date, YYYY-MM-DD (default: today).",
+    )
+    backfill.add_argument(
+        "--end-date",
+        type=_parse_date,
+        help="Latest historical option date to request (default: previous weekday).",
+    )
+    backfill.add_argument(
+        "--start-date",
+        type=_parse_date,
+        help="Earliest historical option date to request; overrides --sessions window.",
+    )
+    backfill.add_argument(
+        "--sessions",
+        type=int,
+        default=20,
+        help="Weekday sessions to plan when --start-date is absent (default: 20).",
+    )
+    backfill.add_argument("--data-dir", help="Override BRIEFING_DATA_DIR.")
+    backfill.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report the backfill plan without requests or writes.",
+    )
+    backfill.add_argument(
+        "--cache-only",
+        action="store_true",
+        help="Replay cached historical option payloads without provider requests.",
+    )
+    backfill.add_argument(
+        "--max-requests",
+        type=int,
+        help="Stop after this many historical option requests even if budget remains.",
+    )
+    backfill.add_argument(
+        "--live-run-reserve",
+        type=int,
+        help=(
+            "Requests to hold back for the daily live run. Default: the full daily "
+            "allowance until today's live run has finished, then a smaller floor so a "
+            "re-run still reaches its providers."
+        ),
+    )
+    backfill.add_argument(
+        "--allow-vendor-splice",
+        action="store_true",
+        help=(
+            "Write even though the backfill's option chains come from a different "
+            "vendor than the live path's. The resulting percentile compares two "
+            "vendors' quotes; only pass this once that has been accepted."
+        ),
+    )
+    backfill.set_defaults(func=run_backfill_iv_command)
 
     gate = subparsers.add_parser(
         "gate", help="Load the universe and run the pre-scoring catalyst gate."
