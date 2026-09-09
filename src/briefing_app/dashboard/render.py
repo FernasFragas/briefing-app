@@ -25,8 +25,11 @@ def render_dashboard_html(payload: DashboardPayload) -> str:
     env.filters["json_pretty"] = _json_pretty
     env.filters["component_count"] = _component_count
     env.filters["thin_evidence"] = _thin_evidence
+    env.filters["thesis_disagrees"] = _thesis_disagrees
     return env.from_string(_TEMPLATE).render(
-        payload=payload, thin_component_count=THIN_COMPONENT_COUNT
+        payload=payload,
+        thin_component_count=THIN_COMPONENT_COUNT,
+        run_health_banner=_run_health_banner(payload.run_health),
     )
 
 
@@ -108,6 +111,87 @@ def _thin_evidence(row: Any) -> bool:
     return bool(scored) and len(scored) < THIN_COMPONENT_COUNT
 
 
+def _thesis_disagrees(row: Any) -> bool:
+    """Whether the declared direction is unsupported by the composite posture.
+
+    This is intentionally presentation-only. The grade continues to use the direction
+    supplied by the strategy layer; a neutral reading is a disagreement for a directional
+    thesis because it does not support the stated long or short view.
+    """
+
+    direction = str(getattr(row, "direction", "") or "").strip().lower()
+    posture = str(getattr(row, "posture", "") or "").strip().lower()
+    if not direction or not posture or posture == "watchlist":
+        return False
+    supporting_postures = {
+        "long": {"moderate_bullish", "strong_bullish"},
+        "short": {"moderate_bearish", "strong_bearish"},
+        "neutral": {"neutral"},
+    }
+    expected = supporting_postures.get(direction)
+    return expected is not None and posture not in expected
+
+
+def _run_health_banner(run_health: Any) -> dict[str, Any] | None:
+    """Return display data only when the supplied completeness summary is degraded."""
+
+    if run_health is None:
+        return None
+
+    components_scored = int(getattr(run_health, "components_scored", 0))
+    components_defined = int(getattr(run_health, "components_defined", 0))
+    names_scored = int(getattr(run_health, "names_scored", 0))
+    names_gated = int(getattr(run_health, "names_gated", 0))
+    providers_answered = _unique_texts(
+        getattr(run_health, "providers_answered", [])
+    )
+    providers_expected = _unique_texts(
+        getattr(run_health, "providers_expected", [])
+    )
+    unanswered_providers = [
+        provider for provider in providers_expected if provider not in providers_answered
+    ]
+    missing_components = max(components_defined - components_scored, 0)
+    missing_names = max(names_gated - names_scored, 0)
+    total_provider_outage = bool(getattr(run_health, "total_provider_outage", False))
+
+    if not (
+        total_provider_outage
+        or missing_components
+        or missing_names
+        or unanswered_providers
+    ):
+        return None
+
+    return {
+        "total_provider_outage": total_provider_outage,
+        "components_scored": components_scored,
+        "components_defined": components_defined,
+        "names_scored": names_scored,
+        "names_gated": names_gated,
+        "missing_components": missing_components,
+        "missing_names": missing_names,
+        "providers_answered": providers_answered,
+        "providers_expected": providers_expected,
+        "unanswered_providers": unanswered_providers,
+    }
+
+
+def _unique_texts(values: Any) -> list[str]:
+    """Normalize provider names without changing their source-supplied display order."""
+
+    if isinstance(values, str):
+        values = [values]
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values or []:
+        text = str(value).strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
+
+
 _TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
@@ -125,6 +209,7 @@ _TEMPLATE = """<!doctype html>
       --accent: #0f766e;
       --warn: #8a4b0f;
       --bad: #9f1239;
+      --outage-bg: #fff1f2;
     }
     * { box-sizing: border-box; }
     body {
@@ -153,6 +238,15 @@ _TEMPLATE = """<!doctype html>
       min-height: 82px;
     }
     .metric strong { display: block; font-size: 13px; margin-bottom: 6px; }
+    .metric-fields {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 3px 10px;
+      margin: 4px 0 0;
+      font-size: 13px;
+    }
+    .metric-fields dt { color: var(--muted); }
+    .metric-fields dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -177,7 +271,32 @@ _TEMPLATE = """<!doctype html>
     .table-scroll table { min-width: 1160px; border: 0; }
     .ideas-table th, .ideas-table td { white-space: nowrap; }
     .ideas-table td:last-child { white-space: normal; min-width: 220px; }
-    .grade-cell { font-weight: 700; }
+    .conviction-cell, .certainty-cell { font-weight: 700; font-variant-numeric: tabular-nums; }
+    .certainty-cell { color: var(--accent); }
+    .disagreement {
+      display: inline-block;
+      margin-top: 3px;
+      padding: 1px 5px;
+      border: 1px solid var(--warn);
+      border-radius: 4px;
+      color: var(--warn);
+      font-size: 11px;
+      font-weight: 700;
+      white-space: normal;
+    }
+    .run-health-banner {
+      margin: 0 0 20px;
+      border: 2px solid var(--warn);
+      border-left-width: 6px;
+      background: #fdf5ea;
+      padding: 12px 14px;
+    }
+    .run-health-banner strong { display: block; }
+    .run-health-banner p { margin: 4px 0 0; }
+    .run-health-banner.total-outage {
+      border-color: var(--bad);
+      background: var(--outage-bg);
+    }
     .comp-count {
       display: inline-block;
       border: 1px solid var(--line);
@@ -260,19 +379,34 @@ _TEMPLATE = """<!doctype html>
     <div class="meta">Run {{ payload.run_id }} · {{ payload.run_date.isoformat() }} · generated {{ payload.generated_at.isoformat() }} · data {{ payload.data_mode }}</div>
   </header>
   <main>
+    {% if run_health_banner %}
+    <section id="run-health" class="run-health-banner{% if run_health_banner.total_provider_outage %} total-outage{% endif %}" role="alert">
+      {% if run_health_banner.total_provider_outage %}
+      <strong>DATA PROVIDER OUTAGE: no expected provider answered.</strong>
+      <p>This report was built without live provider data and must not be treated as a normal daily briefing.</p>
+      {% else %}
+      <strong>Partial run: the report is incomplete.</strong>
+      {% endif %}
+      <p>Scored {{ run_health_banner.components_scored }} of {{ run_health_banner.components_defined }} components and {{ run_health_banner.names_scored }} of {{ run_health_banner.names_gated }} gated names.</p>
+      {% if run_health_banner.missing_components or run_health_banner.missing_names or run_health_banner.unanswered_providers %}
+      <p>Missing: {% if run_health_banner.missing_components %}{{ run_health_banner.missing_components }} components{% endif %}{% if run_health_banner.missing_components and (run_health_banner.missing_names or run_health_banner.unanswered_providers) %}; {% endif %}{% if run_health_banner.missing_names %}{{ run_health_banner.missing_names }} gated names{% endif %}{% if run_health_banner.missing_names and run_health_banner.unanswered_providers %}; {% endif %}{% if run_health_banner.unanswered_providers %}providers {{ run_health_banner.unanswered_providers|join_or_unavailable }} did not answer{% endif %}.</p>
+      {% endif %}
+    </section>
+    {% endif %}
     <section id="trading-ideas">
       <h2>Trading Ideas</h2>
       {% if payload.trading_ideas %}
-      <p class="legend muted">Each grade carries the number of components the composite was
+      <p class="legend muted"><strong>Conviction</strong> is the uncapped 0–100 measure of how strongly the evidence supports the declared idea. <strong>Certainty</strong> is the data-quality letter that limits how far that conviction can be trusted. A high conviction with C certainty is therefore a warning about evidence quality, not a contradiction.</p>
+      <p class="legend muted">Each conviction carries the number of components the composite was
       built from (<span class="comp-count">4/5</span>). Components that could not be sourced are
       dropped and the remaining weights renormalised, so a
-      <span class="comp-count thin">2/5</span> grade is a different quantity from a 4/5 one and
-      the two are not directly comparable. Rows graded on fewer than
-      {{ thin_component_count }} components are highlighted.</p>
+      <span class="comp-count thin">2/5</span> conviction is a different quantity from a 4/5 one and
+      the two are not directly comparable.
+      Rows graded on fewer than {{ thin_component_count }} components are highlighted.</p>
       <div class="table-scroll" role="region" aria-label="Trading ideas">
         <table class="ideas-table">
           <thead>
-            <tr><th>Ticker</th><th>Status</th><th>Setup</th><th>Direction</th><th>Grade</th><th>Thesis</th><th>S_CTE</th><th>Composite</th><th>Catalyst</th><th>Blocked Reason</th><th>Penalties</th><th>Headline</th></tr>
+            <tr><th>Ticker</th><th>Status</th><th>Setup</th><th>Thesis</th><th>Data reads</th><th>Conviction</th><th>Certainty</th><th>P(thesis band)</th><th>Components</th><th>Catalyst</th><th>Blocked Reason</th><th>Penalties</th><th>Headline</th></tr>
           </thead>
           <tbody>
           {% for row in payload.trading_ideas %}
@@ -281,13 +415,14 @@ _TEMPLATE = """<!doctype html>
               <td>{{ row.status }}</td>
               <td>{{ row.setup_type|display }}</td>
               <td>{{ row.direction|display }}</td>
-              <td class="grade-cell">{{ row.grade_letter|display }}{% if row.grade_score is not none %} <span class="muted">({{ row.grade_score|display }})</span>{% endif %}{% if row|component_count %} <span class="comp-count{% if row|thin_evidence %} thin{% endif %}" title="{{ row|component_count }} components: composite built from {{ row.scored_components|join_or_unavailable }} with the remaining weights renormalised">{{ row|component_count }}</span>{% endif %}</td>
+              <td>{{ row.posture|display }}{% if row.composite_score is not none %} <span class="muted">({{ row.composite_score|score }})</span>{% endif %}{% if row|thesis_disagrees %}<div class="disagreement">thesis disagrees with data</div>{% endif %}</td>
+              <td class="conviction-cell">{{ row.grade_score|display }}</td>
+              <td class="certainty-cell">{{ row.grade_letter|display }}</td>
               <td>{{ row.thesis_band|display }}{% if row.thesis_probability is not none %} <span class="muted">({{ row.thesis_probability|display }})</span>{% endif %}</td>
-              <td>{{ row.s_cte|score }}</td>
-              <td>{% if row.scored_components %}{% if row.weight_profile %}{{ row.weight_profile }} · {% endif %}{{ row.scored_components|join_or_unavailable }}{% if row.missing_components %}<div class="muted">missing {{ row.missing_components|join_or_unavailable }}</div>{% endif %}{% else %}unavailable{% endif %}</td>
+              <td>{% if row.scored_components %}{% if row.weight_profile %}{{ row.weight_profile }} · {% endif %}{{ row.scored_components|join_or_unavailable }}{% if row|component_count %} <span class="comp-count{% if row|thin_evidence %} thin{% endif %}" title="{{ row|component_count }} components: composite built from {{ row.scored_components|join_or_unavailable }} with the remaining weights renormalised">{{ row|component_count }}</span>{% endif %}{% if row.missing_components %}<div class="muted">missing {{ row.missing_components|join_or_unavailable }}</div>{% endif %}{% else %}unavailable{% endif %}</td>
               <td>{% if row.catalyst %}{{ row.catalyst.name|display }}{% if row.catalyst.date %} · {{ row.catalyst.date }}{% endif %}{% if row.catalyst.status %} · {{ row.catalyst.status }}{% endif %}{% else %}unavailable{% endif %}</td>
               <td>{{ row.blocked_reason|display }}</td>
-              <td>{{ row.grade_penalties|join_or_unavailable }}</td>
+              <td>{{ row.grade_penalties|join_or_unavailable }}{% if row.grade_penalty_total %} <span class="muted">(-{{ row.grade_penalty_total|display }})</span>{% endif %}</td>
               <td>{{ row.headline|display }}</td>
             </tr>
           {% endfor %}
@@ -354,7 +489,16 @@ _TEMPLATE = """<!doctype html>
         {% for point in payload.market_overview %}
         <div class="metric">
           <strong>{{ point.label }}</strong>
+          {% if point.value is not none or not point.fields %}
           <div>{{ point.value|display }}</div>
+          {% endif %}
+          {% if point.fields %}
+          <dl class="metric-fields">
+            {% for name, value in point.fields.items() %}
+            <dt>{{ name.replace("_", " ") }}</dt><dd>{{ value|display }}</dd>
+            {% endfor %}
+          </dl>
+          {% endif %}
           <div class="muted">{{ point.source }}{% if point.as_of %} · {{ point.as_of }}{% endif %}</div>
           {% if point.note %}<div class="muted">{{ point.note }}</div>{% endif %}
         </div>

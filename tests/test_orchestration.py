@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import io
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError
@@ -551,7 +552,9 @@ def test_fixture_scenario_probabilities_do_not_flag_spurious_divergence() -> Non
     assert table.probability_in_one_sigma == pytest.approx(0.59, abs=0.06)
 
 
-def test_daily_fixture_run_generates_dashboard_and_persists_rows(tmp_path) -> None:
+def test_daily_fixture_run_generates_dashboard_and_refuses_snapshot_persistence(
+    tmp_path,
+) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     create_schema(engine)
     repo = StorageRepository(engine)
@@ -576,7 +579,8 @@ def test_daily_fixture_run_generates_dashboard_and_persists_rows(tmp_path) -> No
         repository=repo,
     )
 
-    assert output.status == STATUS_SUCCEEDED
+    assert output.status == STATUS_PARTIAL
+    assert any("daily_snapshot persistence refused" in item for item in output.diagnostics)
     assert output.html_path is not None and output.html_path.exists()
     assert output.json_path is not None and output.json_path.exists()
     assert output.status_path is not None and output.status_path.exists()
@@ -613,10 +617,10 @@ def test_daily_fixture_run_generates_dashboard_and_persists_rows(tmp_path) -> No
         run_row = conn.execute(
             select(briefing_run).where(briefing_run.c.id == output.storage_run_id)
         ).one()
-        assert run_row._mapping["status"] == STATUS_SUCCEEDED
+        assert run_row._mapping["status"] == STATUS_PARTIAL
         assert len(conn.execute(select(candidate_gate)).all()) == 1
         assert len(conn.execute(select(component_score)).all()) == 5
-        assert len(conn.execute(select(daily_snapshot)).all()) == 2
+        assert len(conn.execute(select(daily_snapshot)).all()) == 1
         assert len(conn.execute(select(evidence_ledger)).all()) > 0
         assert len(conn.execute(select(setup_signal)).all()) == 1
 
@@ -1186,7 +1190,7 @@ pipeline:
         ]
     )
 
-    assert exit_code == 0
+    assert exit_code == 1
     dashboard = tmp_path / "output" / "dashboard" / RUN_DATE.isoformat() / "dashboard.json"
     assert dashboard.exists()
     payload = json.loads(dashboard.read_text(encoding="utf-8"))
@@ -1581,3 +1585,193 @@ def test_analyst_leg_falls_back_to_finnhub_when_fmp_returns_nothing(tmp_path) ->
     assert [s.source for s in signals] == ["Finnhub recommendation-trends"]
     assert signals[0].rating == "buy"
     assert any("grades-consensus" in call for call in fetcher.calls)
+
+
+# ---------------------------------------------------------------------------------------
+# Lane G / D9 - a degraded run must report itself as degraded, and a healthy one must not.
+#
+# Both halves are asserted here on purpose. Escalating everything would make `partial` the
+# new constant and leave the status carrying exactly as little information as `succeeded`
+# did on `daily-2026-09-07-f1b0d2e1`, which is the run that opened this decision.
+# ---------------------------------------------------------------------------------------
+
+
+class RunHealthDataSource(FixtureDataSource):
+    """A fixture source that can report the issues and provider answers a live pull would.
+
+    It keeps the fixture pipeline deterministic while letting a test stage the exact
+    situations D9 names: a warm-up baseline, a spent allowance, a total outage.
+    """
+
+    def __init__(
+        self,
+        *,
+        issues: tuple[str, ...] = (),
+        answered: tuple[str, ...] = ("cboe", "fmp"),
+        expected: tuple[str, ...] = ("cboe", "fmp"),
+        failing_tickers: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(failing_tickers=failing_tickers)
+        self.data_mode = "live"
+        self._issues = issues
+        self._answered = answered
+        self._expected = expected
+
+    def expected_providers(self, config: AppConfig) -> tuple[str, ...]:
+        return self._expected
+
+    def pull_ticker(self, **kwargs):
+        data = super().pull_ticker(**kwargs)
+        return replace(data, issues=self._issues, providers_answered=self._answered)
+
+
+def _run_health_run(tmp_path, source: RunHealthDataSource, tickers: list[str]):
+    return run_daily(
+        fixture_config(tickers),
+        run_date=RUN_DATE,
+        data_dir=tmp_path / "data",
+        output_dir=tmp_path / "output",
+        data_source=source,
+        persist=False,
+    )
+
+
+def test_a_warm_up_only_run_still_reports_succeeded(tmp_path) -> None:
+    """D9's explicit carve-out: the baseline filling up is the design, not a fault.
+
+    These four lines are what a perfectly healthy run of this application emits every day
+    for its first four weeks. If they marked it `partial`, the new status would be a
+    constant and this lane would have moved the defect rather than fixed it.
+    """
+
+    output = _run_health_run(
+        tmp_path,
+        RunHealthDataSource(
+            issues=(
+                "iv_rank baseline still building: 3 of 20 sessions stored",
+                "put/call volume percentile baseline still building: 3 of 20 sessions stored",
+                "put/call open-interest percentile baseline still building: 3 of 20 "
+                "sessions stored",
+                "Finnhub company news unavailable (no_credentials): Missing credential.",
+            )
+        ),
+        ["NVDA"],
+    )
+
+    assert output.status == STATUS_SUCCEEDED
+    assert output.diagnostics == []
+    assert output.run_health is not None
+    assert output.run_health.total_provider_outage is False
+    assert output.run_health.names_scored == output.run_health.names_gated == 1
+
+
+def test_a_run_that_reached_no_provider_reports_partial_and_names_them(tmp_path) -> None:
+    """The 2026-09-07 signature: nothing fetched, and the status said `succeeded`."""
+
+    output = _run_health_run(
+        tmp_path,
+        RunHealthDataSource(
+            answered=(),
+            expected=("cboe", "fmp", "finnhub", "alpha_vantage", "finra"),
+        ),
+        ["NVDA", "AMD"],
+    )
+
+    assert output.status == STATUS_PARTIAL
+    assert output.run_health is not None
+    assert output.run_health.total_provider_outage is True
+    assert output.run_health.providers_answered == []
+
+    outage = [item for item in output.diagnostics if item.startswith("outage: ")]
+    assert len(outage) == 1
+    assert "no provider was reached" in outage[0]
+    for provider in ("cboe", "fmp", "finnhub", "alpha_vantage", "finra"):
+        assert provider in outage[0]
+
+    # The report carries the same summary the status was computed from, so a reader of the
+    # HTML and a reader of the status file cannot reach different conclusions.
+    assert output.dashboard is not None
+    assert output.dashboard.run_health is output.run_health
+
+
+def test_one_provider_of_five_failing_is_partial_but_not_a_total_outage(tmp_path) -> None:
+    """G3: partial degradation and a total outage are categorically different."""
+
+    output = _run_health_run(
+        tmp_path,
+        RunHealthDataSource(
+            answered=("cboe", "fmp", "alpha_vantage", "finra"),
+            expected=("cboe", "fmp", "finnhub", "alpha_vantage", "finra"),
+        ),
+        ["NVDA"],
+    )
+
+    assert output.status == STATUS_PARTIAL
+    assert output.run_health is not None
+    assert output.run_health.total_provider_outage is False
+
+    outage = [item for item in output.diagnostics if item.startswith("outage: ")]
+    assert len(outage) == 1
+    assert "finnhub did not answer" in outage[0]
+    assert "no provider was reached" not in outage[0]
+
+
+def test_missing_prices_marks_the_run_partial_and_aggregates_the_names(tmp_path) -> None:
+    """G1's second worked example, and G2's aggregation rule, on one run."""
+
+    output = _run_health_run(
+        tmp_path,
+        RunHealthDataSource(
+            issues=(
+                "FMP historical price EOD unavailable (budget_exhausted): allowance spent",
+                "iv_rank baseline still building: 3 of 20 sessions stored",
+            )
+        ),
+        ["NVDA", "AMD"],
+    )
+
+    assert output.status == STATUS_PARTIAL
+
+    # Two names, one issue each, one diagnostic - and the warm-up notice adds none.
+    assert len(output.diagnostics) == 1
+    assert output.diagnostics[0].startswith("outage: ")
+    assert "allowance spent" in output.diagnostics[0]
+    assert "all 2 names" in output.diagnostics[0]
+
+
+def test_run_health_is_written_to_the_saved_run_status_file(tmp_path) -> None:
+    """G4: "was today's run any good?" is answerable without opening the report."""
+
+    output = run_daily(
+        fixture_config(["NVDA"]),
+        run_date=RUN_DATE,
+        data_dir=tmp_path / "data",
+        output_dir=tmp_path / "output",
+        data_source=RunHealthDataSource(answered=(), expected=("cboe", "fmp")),
+    )
+
+    assert output.status_path is not None
+    status = json.loads(output.status_path.read_text(encoding="utf-8"))
+    assert status["run_health"]["total_provider_outage"] is True
+    assert status["run_health"]["providers_expected"] == ["cboe", "fmp"]
+    assert status["run_health"]["names_gated"] == 1
+
+
+def test_a_clean_fixture_run_reports_succeeded_with_no_health_diagnostics(tmp_path) -> None:
+    """The other half of definition-of-done item 9, on the plain fixture source."""
+
+    output = run_daily(
+        fixture_config(["NVDA"]),
+        run_date=RUN_DATE,
+        data_dir=tmp_path / "data",
+        output_dir=tmp_path / "output",
+        persist=False,
+    )
+
+    assert output.status == STATUS_SUCCEEDED
+    assert output.diagnostics == []
+    assert output.run_health is not None
+    assert output.run_health.providers_answered == ["fixture"]
+    assert output.run_health.providers_expected == ["fixture"]
+    assert output.run_health.total_provider_outage is False
+    assert output.run_health.components_scored == output.run_health.components_defined

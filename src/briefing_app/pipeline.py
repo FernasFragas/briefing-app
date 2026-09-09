@@ -31,6 +31,7 @@ from briefing_app.components import (
 )
 from briefing_app.config import AppConfig, load_config
 from briefing_app.dashboard import DashboardPayload, MarketOverviewPoint, build_dashboard_payload
+from briefing_app.dashboard.models import RunHealth
 from briefing_app.dashboard.render import write_dashboard_artifacts
 from briefing_app.http import Fetcher
 from briefing_app.models.candidate import Geography
@@ -55,10 +56,26 @@ from briefing_app.options_math import (
     build_options_structure,
     normalize_option_quotes,
 )
-from briefing_app.provider_validation import MALFORMED, OK, SYNTHETIC
+from briefing_app.provider_validation import (
+    MALFORMED,
+    MISSING,
+    OK,
+    PAYWALLED,
+    PLACEHOLDER,
+    SYNTHETIC,
+    THROTTLED,
+    TRUNCATED,
+)
 from briefing_app.providers.alpha_vantage import AlphaVantageClient
 from briefing_app.providers.apewisdom import ApeWisdomClient
-from briefing_app.providers.base import ProviderDataError, ProviderResponse
+from briefing_app.providers.base import (
+    NETWORK_ERROR,
+    NO_CREDENTIALS,
+    PLAN_GATED,
+    REPEAT_REFUSAL,
+    ProviderDataError,
+    ProviderResponse,
+)
 from briefing_app.providers.budget import RequestBudget
 from briefing_app.providers.cboe import CboeOptionsClient
 from briefing_app.providers.finnhub import FinnhubClient
@@ -111,7 +128,7 @@ from briefing_app.scoring import (
     to_scoring_evidence_rows,
 )
 from briefing_app.settings import AppSettings
-from briefing_app.storage import StorageRepository
+from briefing_app.storage import DailySnapshotPersistenceRefused, StorageRepository
 from briefing_app.strategy import SetupContext, evaluate_candidate_setups, to_setup_signal_rows
 from briefing_app.strategy.models import CandidateSetupResult, SetupReport, to_setup_evidence_rows
 from briefing_app.universe.gate import run_gate
@@ -238,6 +255,118 @@ STATUS_PLAN_GATED = "plan_gated"
 STATUS_BUDGET_EXHAUSTED = "budget_exhausted"
 
 
+# --------------------------------------------------------------------------------------
+# D9 run health: severities for the per-ticker `issues` list.
+#
+# The `issues` list records everything a leg noticed while pulling data. Before D9 none of
+# it reached `output.diagnostics`, so a run that fetched nothing still reported
+# `succeeded`. Escalating all of it is the opposite mistake: the warm-up notice below is
+# true every run for the first four weeks, so a rule that escalated it would make
+# `partial` the new constant and carry exactly as little information as `succeeded` did.
+#
+# Every recording point is therefore classified. The full table, with the reasoning for
+# each line, is `docs/RUN-HEALTH.md`; `_issue_severity` below is that table in code.
+# --------------------------------------------------------------------------------------
+
+#: An expected condition of a healthy system. Recorded, never escalated.
+SEVERITY_NORMAL = "normal"
+#: Real data is missing and the output is weaker for it. Marks the run `partial`.
+SEVERITY_DEGRADED = "degraded"
+#: A source that should have answered was never reached. Marks the run `partial`, first.
+SEVERITY_OUTAGE = "outage"
+
+SEVERITY_ORDER = {SEVERITY_OUTAGE: 0, SEVERITY_DEGRADED: 1, SEVERITY_NORMAL: 2}
+
+#: Severities that reach `output.diagnostics` and therefore mark the run `partial`.
+ESCALATING_SEVERITIES = frozenset({SEVERITY_DEGRADED, SEVERITY_OUTAGE})
+
+#: `_provider_error_message` renders `"<label> unavailable (<status>)"`. The status is the
+#: only thing that separates "we hold no key for this source" from "this source was there
+#: and we could not reach it", and those are opposite answers to "was today's run any
+#: good?", so the split is made on the status rather than on the wording.
+#:
+#: `no_credentials`, `plan_gated` and `paywalled` are entitlement facts: identical every
+#: run, decided by what the owner has paid for, and already reported by preflight. They
+#: are `normal` because escalating a standing configuration choice would mark every run
+#: partial for as long as the choice stands.
+PROVIDER_STATUS_SEVERITY = {
+    NO_CREDENTIALS: SEVERITY_NORMAL,
+    PLAN_GATED: SEVERITY_NORMAL,
+    PAYWALLED: SEVERITY_NORMAL,
+    STATUS_BUDGET_EXHAUSTED: SEVERITY_OUTAGE,
+    THROTTLED: SEVERITY_OUTAGE,
+    NETWORK_ERROR: SEVERITY_OUTAGE,
+    REPEAT_REFUSAL: SEVERITY_DEGRADED,
+    MISSING: SEVERITY_DEGRADED,
+    MALFORMED: SEVERITY_DEGRADED,
+    SYNTHETIC: SEVERITY_DEGRADED,
+    PLACEHOLDER: SEVERITY_DEGRADED,
+    TRUNCATED: SEVERITY_DEGRADED,
+}
+
+#: Matches the `(status)` in `_provider_error_message`.
+_PROVIDER_UNAVAILABLE_RE = re.compile(r" unavailable \(([a-z_]+)\)")
+
+#: Ordered `(marker, severity)` rules over the issue text. First match wins; anything
+#: unmatched is `degraded`, because an unclassified problem someone bothered to record is
+#: more likely to be a real gap than a routine one, and a wrong `degraded` is visible
+#: while a wrong `normal` is the defect D9 exists to close.
+ISSUE_SEVERITY_RULES: tuple[tuple[str, str], ...] = (
+    # The self-built IV and put/call baselines fill one session per run and are withheld
+    # until they are long enough to rank against. True every run for ~4 weeks by design.
+    (" baseline still building: ", SEVERITY_NORMAL),
+    # `_unsupported_provider_message`: the configured chain names a provider this module
+    # has no hook for, so the chain moved to the next one. A property of the configuration,
+    # identical every run; whether the leg actually ended up empty is caught by the
+    # component and name counts, not by this line.
+    ("but no live provider hook is wired", SEVERITY_NORMAL),
+    # A provider answered and the payload could not be read into the app's types.
+    ("normalization failed", SEVERITY_DEGRADED),
+    # FRED answered the series lookup without the release id the calendar join needs.
+    ("reported no release id", SEVERITY_DEGRADED),
+    # No database, so the self-built baselines can never build. Not a warm-up.
+    ("no database is configured for this run", SEVERITY_DEGRADED),
+    # A previously cached political-flow payload could not be re-read, so the window is
+    # short of days even though today's own fetch was fine.
+    ("ignored:", SEVERITY_DEGRADED),
+)
+
+#: Credential each wired provider needs, or `None` when it is keyless. Used to decide
+#: which providers this run could legitimately have expected an answer from: a provider
+#: with no key was never going to answer and naming it as unanswered every run is the
+#: constant-`partial` failure again.
+PROVIDER_CREDENTIAL_ENV: dict[str, str | None] = {
+    "alpha_vantage": "ALPHA_VANTAGE_API_KEY",
+    "finnhub": "FINNHUB_API_KEY",
+    "fmp": "FMP_API_KEY",
+    "fred": "FRED_API_KEY",
+    "twelve_data": "TWELVE_DATA_API_KEY",
+    "apewisdom": None,
+    "cboe": None,
+    "finra": None,
+    "sec_edgar": None,
+}
+
+#: The `ProvidersSettings` chains `LiveDataSource` actually reads. `quotes`, `put_call`
+#: and `institutional` are deliberately absent: no code path consumes them, so a provider
+#: named there is never asked and must never be reported as having failed to answer.
+PROVIDER_CHAIN_LEGS: tuple[str, ...] = (
+    "options",
+    "prices",
+    "news",
+    "earnings",
+    "macro",
+    "analyst",
+    "insider",
+    "political",
+    "retail",
+    "short_interest",
+)
+
+#: What a fixture run reports as its one source, so fixture and live share one shape.
+FIXTURE_PROVIDER = "fixture"
+
+
 class FixtureFabricationError(RuntimeError):
     """Fixture mode was asked to score a leg the live path has no source for."""
 
@@ -264,6 +393,12 @@ class TickerData:
     risk_reversal_history: tuple[float, ...] = ()
     raw_paths: tuple[Path, ...] = ()
     evidence_rows: tuple[dict[str, Any], ...] = ()
+    #: Everything the legs noticed while pulling this ticker. D9: the orchestrator
+    #: classifies these and escalates the ones that mean the output is worse.
+    issues: tuple[str, ...] = ()
+    #: Providers that returned at least one response for this ticker. A provider absent
+    #: from every ticker's set was not reached at all on this run.
+    providers_answered: tuple[str, ...] = ()
 
 
 class PipelineDataSource(Protocol):
@@ -305,6 +440,14 @@ class PipelineDataSource(Protocol):
     ) -> TickerData:
         ...
 
+    def expected_providers(self, config: AppConfig) -> tuple[str, ...]:
+        """Providers this run could legitimately expect an answer from.
+
+        Read through `getattr`, so a source that does not implement it simply reports no
+        expectation rather than being accused of an outage it cannot have had.
+        """
+        ...
+
 
 @dataclass
 class PipelineRunOutput:
@@ -328,6 +471,10 @@ class PipelineRunOutput:
     gate_markdown_path: Path | None = None
     diagnostics: list[str] = field(default_factory=list)
     failures: list[StageFailure] = field(default_factory=list)
+    #: D9/G4 completeness summary. `None` for a run that never got past the gate (a
+    #: skipped weekend, a load failure), which is why the banner treats it as absent
+    #: rather than as a clean run.
+    run_health: RunHealth | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -347,6 +494,9 @@ class PipelineRunOutput:
             ),
             "diagnostics": list(self.diagnostics),
             "failures": [failure.to_dict() for failure in self.failures],
+            "run_health": (
+                self.run_health.model_dump(mode="json") if self.run_health else None
+            ),
             "dashboard_counts": self.dashboard.counts if self.dashboard else None,
             "scoring_counts": self.scoring_report.counts() if self.scoring_report else None,
             "setup_counts": self.setup_report.counts() if self.setup_report else None,
@@ -622,6 +772,32 @@ def run_pipeline(
             if repo is not None and persist
             else []
         )
+
+        # D9. Per-ticker problems used to stop here, in a local list nobody read, which is
+        # how a run that reached no provider reported `succeeded` with zero diagnostics.
+        # The escalation happens before the dashboard is built so the report carries the
+        # same diagnostics the status is computed from.
+        run_health, health_diagnostics = _assess_run_health(
+            run_date=effective_date,
+            attempted_tickers=accepted_tickers,
+            completed_tickers=sorted(ticker_data),
+            failed_tickers=[failure.ticker for failure in output.failures],
+            score_results=score_results,
+            issues_by_ticker={
+                ticker: data.issues for ticker, data in ticker_data.items()
+            },
+            providers_answered=sorted(
+                {
+                    provider
+                    for data in ticker_data.values()
+                    for provider in data.providers_answered
+                }
+            ),
+            providers_expected=_expected_providers(source, loaded_config),
+        )
+        output.run_health = run_health
+        output.diagnostics.extend(health_diagnostics)
+
         dashboard = build_dashboard_payload(
             run_id=run_id,
             run_date=effective_date,
@@ -638,6 +814,7 @@ def run_pipeline(
             prior_scorecards=prior_scorecards,
             market_overview=market_points,
             diagnostics=output.diagnostics,
+            run_health=run_health,
         )
         output.dashboard = dashboard
 
@@ -652,7 +829,10 @@ def run_pipeline(
                     ticker: data.option_structure for ticker, data in ticker_data.items()
                 },
             ):
-                repo.upsert_daily_snapshot(_json_field_safe_mapping(row))
+                try:
+                    repo.upsert_daily_snapshot(_json_field_safe_mapping(row))
+                except DailySnapshotPersistenceRefused as exc:
+                    output.diagnostics.append(str(exc))
             repo.upsert_evidence_rows(_with_run_id(dashboard_evidence, output.storage_run_id))
             for row in to_setup_signal_rows(setup_report, run_id=output.storage_run_id):
                 repo.upsert_setup_signal(_json_field_safe_mapping(row))
@@ -690,6 +870,10 @@ class FixtureDataSource:
 
     def __init__(self, failing_tickers: Iterable[str] = ()) -> None:
         self.failing_tickers = {ticker.strip().upper() for ticker in failing_tickers}
+
+    def expected_providers(self, config: AppConfig) -> tuple[str, ...]:
+        """One source, always reachable. A fixture run can have no provider outage."""
+        return (FIXTURE_PROVIDER,)
 
     def preflight_rows(
         self,
@@ -1026,6 +1210,7 @@ class FixtureDataSource:
             # reject for want of history in fixture mode exactly as it does live.
             raw_paths=tuple(raw_paths),
             evidence_rows=tuple(extra_evidence),
+            providers_answered=(FIXTURE_PROVIDER,),
         )
         _refuse_fabricated_legs(ticker, data)
         return data
@@ -1069,6 +1254,43 @@ class LiveDataSource:
         ] = {}
         #: Shared by every client this source builds, so one run honours one budget.
         self._budget = budget or RequestBudget(self.settings.data_dir)
+
+    def expected_providers(self, config: AppConfig) -> tuple[str, ...]:
+        """The provider each consumed leg depends on: its first wired, credentialled entry.
+
+        Three filters, and all three matter for D9. A provider with no hook in this module
+        was never going to be asked; a provider whose credential is not configured was
+        never going to answer; and a fallback behind a healthy lead is *meant* to go
+        unused. Reporting any of them as unanswered would put an outage banner on every
+        healthy run and leave the status exactly as uninformative as D9 found it.
+        """
+
+        names: list[str] = []
+        for leg in PROVIDER_CHAIN_LEGS:
+            lead = self._chain_lead(config, leg)
+            if lead is not None and lead not in names:
+                names.append(lead)
+        return tuple(names)
+
+    def _chain_lead(self, config: AppConfig, leg: str) -> str | None:
+        """The provider a leg depends on: the first one that is wired and credentialled.
+
+        The rest of the chain is fallback, and a fallback that goes unused is a sign of
+        health rather than of failure - so only the lead is ever `expected`.
+        """
+
+        for provider in _provider_order(config, leg):
+            if provider not in PROVIDER_CREDENTIAL_ENV:
+                continue
+            if self._provider_credentialled(provider):
+                return provider
+        return None
+
+    def _provider_credentialled(self, provider: str) -> bool:
+        credential_env = PROVIDER_CREDENTIAL_ENV.get(provider)
+        if credential_env is None:
+            return True
+        return bool(self.settings.credential(credential_env))
 
     def preflight_rows(
         self,
@@ -1532,6 +1754,10 @@ class LiveDataSource:
             components=(macro, sentiment, insider, institutional),
             raw_paths=tuple(raw_paths),
             evidence_rows=tuple(extra_evidence),
+            issues=tuple(issues),
+            providers_answered=tuple(
+                sorted({response.provider for response in responses})
+            ),
         )
 
     def _pull_option_chain(
@@ -2930,6 +3156,159 @@ def _final_status(output: PipelineRunOutput) -> str:
     return STATUS_SUCCEEDED
 
 
+def _expected_providers(source: Any, config: AppConfig) -> tuple[str, ...]:
+    """Ask the data source which providers this run depended on, tolerantly.
+
+    A source that does not implement it reports no expectation, which is the right answer
+    for a stub: it cannot have suffered an outage of providers it never had.
+    """
+
+    resolve = getattr(source, "expected_providers", None)
+    if resolve is None:
+        return ()
+    return tuple(resolve(config))
+
+
+def _issue_severity(issue: str) -> str:
+    """Classify one per-ticker issue as `normal`, `degraded` or `outage`.
+
+    This function *is* the table in `docs/RUN-HEALTH.md`. Change one and change the other,
+    or the document stops being arguable-with, which was the point of writing it down.
+    """
+
+    match = _PROVIDER_UNAVAILABLE_RE.search(issue)
+    if match is not None:
+        return PROVIDER_STATUS_SEVERITY.get(match.group(1), SEVERITY_DEGRADED)
+    for marker, severity in ISSUE_SEVERITY_RULES:
+        if marker in issue:
+            return severity
+    return SEVERITY_DEGRADED
+
+
+def _affected_names(tickers: Sequence[str], attempted: int) -> str:
+    """Name the affected tickers once, in one clause.
+
+    Eighteen names each missing prices is one diagnostic naming the eighteen. A
+    diagnostics list nobody can read is the same defect in a new costume.
+    """
+
+    names = sorted(tickers)
+    if attempted > 1 and len(names) == attempted:
+        return f"all {attempted} names"
+    return f"{len(names)} of {attempted} names: {', '.join(names)}"
+
+
+def _aggregated_issue_diagnostics(
+    issues_by_ticker: Mapping[str, Sequence[str]],
+    *,
+    attempted: int,
+) -> list[str]:
+    """One diagnostic per distinct escalating issue, naming every ticker it hit."""
+
+    grouped: dict[tuple[str, str], set[str]] = {}
+    for ticker, issues in issues_by_ticker.items():
+        for issue in dict.fromkeys(issues):
+            severity = _issue_severity(issue)
+            if severity not in ESCALATING_SEVERITIES:
+                continue
+            grouped.setdefault((severity, issue), set()).add(ticker)
+
+    return [
+        f"{severity}: {issue} [{_affected_names(sorted(tickers), attempted)}]"
+        for (severity, issue), tickers in sorted(
+            grouped.items(), key=lambda item: (SEVERITY_ORDER[item[0][0]], item[0][1])
+        )
+    ]
+
+
+def _assess_run_health(
+    *,
+    run_date: date_type,
+    attempted_tickers: Sequence[str],
+    completed_tickers: Sequence[str],
+    failed_tickers: Sequence[str],
+    score_results: Sequence[Any],
+    issues_by_ticker: Mapping[str, Sequence[str]],
+    providers_answered: Sequence[str],
+    providers_expected: Sequence[str],
+) -> tuple[RunHealth, list[str]]:
+    """Summarize what the run actually produced, and say so out loud when it is less.
+
+    Returns the completeness summary the report banner reads (G4) and the diagnostics
+    that make `_final_status` return `partial` (G2, G3). There is deliberately no second
+    status rule: everything here works by putting a readable line in `output.diagnostics`.
+    """
+
+    answered = list(dict.fromkeys(providers_answered))
+    expected = list(dict.fromkeys(providers_expected))
+    unanswered = [provider for provider in expected if provider not in answered]
+
+    # A run where every ticker raised has no provider answers because nothing got far
+    # enough to ask. That is already a failure; calling it an outage as well would put a
+    # second, wrong name on it.
+    total_provider_outage = bool(expected) and not answered and bool(completed_tickers)
+
+    scored_tickers = {
+        result.ticker for result in score_results if result.s_cte is not None
+    }
+    components_defined = 0
+    components_scored = 0
+    for result in score_results:
+        for component in result.components:
+            if component.component in DECLARED_UNSCORABLE_COMPONENTS:
+                # Declared permanently n/a by decision, not missing by accident. Counting
+                # it would put every run one component short of complete forever.
+                continue
+            components_defined += 1
+            if component.is_available:
+                components_scored += 1
+
+    run_health = RunHealth(
+        components_scored=components_scored,
+        components_defined=components_defined,
+        names_scored=len(scored_tickers),
+        names_gated=len(attempted_tickers),
+        providers_answered=answered,
+        providers_expected=expected,
+        total_provider_outage=total_provider_outage,
+    )
+
+    diagnostics: list[str] = []
+    if total_provider_outage:
+        diagnostics.append(
+            f"{SEVERITY_OUTAGE}: no provider was reached on {run_date.isoformat()}. "
+            f"{', '.join(expected)} were each expected to answer and none did, so every "
+            "number in this report was computed without fresh provider data."
+        )
+    elif unanswered:
+        diagnostics.append(
+            f"{SEVERITY_OUTAGE}: {', '.join(unanswered)} did not answer on "
+            f"{run_date.isoformat()}; "
+            f"{', '.join(answered) if answered else 'no provider'} did."
+        )
+
+    diagnostics.extend(
+        _aggregated_issue_diagnostics(issues_by_ticker, attempted=len(attempted_tickers))
+    )
+
+    failed = set(failed_tickers)
+    unscored = sorted(
+        ticker
+        for ticker in attempted_tickers
+        if ticker not in scored_tickers and ticker not in failed
+    )
+    if unscored:
+        # Every one of these already has its own failure diagnostic when it raised; these
+        # are the quieter case - the pull returned, and nothing came out of it.
+        diagnostics.append(
+            f"{SEVERITY_DEGRADED}: {len(unscored)} of {len(attempted_tickers)} gated "
+            f"names produced no score at all: {', '.join(unscored)}"
+        )
+
+    return run_health, diagnostics
+
+
+
 def _finish_output(
     output: PipelineRunOutput,
     repo: StorageRepository | None,
@@ -2958,6 +3337,11 @@ def _finish_output(
                 "diagnostics": output.diagnostics,
                 "failures": [failure.to_dict() for failure in output.failures],
                 "status_path": str(output.status_path) if output.status_path else None,
+                "run_health": (
+                    output.run_health.model_dump(mode="json")
+                    if output.run_health
+                    else None
+                ),
             },
         )
     return output

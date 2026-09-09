@@ -14,6 +14,7 @@ from briefing_app.dashboard.models import (
     PerTickerSection,
     PriorScorecardRow,
     RejectedGateRow,
+    RunHealth,
     TacticalDashboard,
     TradingIdeaRow,
 )
@@ -99,6 +100,8 @@ def dashboard_payload(
                 setup_type="EVENT_DIRECTIONAL_LONG",
                 grade_letter="B+",
                 grade_score=77.4,
+                posture="moderate_bullish",
+                composite_score=0.62,
                 thesis_probability=0.68,
                 thesis_band="beyond +1 sigma",
                 direction="long",
@@ -376,22 +379,39 @@ def test_dashboard_html_trading_ideas_empty_state_is_explicit() -> None:
     assert 'class="ideas-table"' not in html
 
 
-def test_dashboard_html_ideas_table_scrolls_and_carries_no_tier_badge() -> None:
-    """The tier column was removed from the graded ideas table on 2026-09-06.
+def test_dashboard_html_renders_index_market_context_fields() -> None:
+    payload = dashboard_payload()
+    payload.market_overview = [
+        MarketOverviewPoint(
+            label="SPY market context",
+            value=None,
+            fields={
+                "spot": 500.0,
+                "implied_volatility_pct": 22.0,
+                "expected_move_pct": 1.5,
+                "expected_move_points": 7.5,
+                "composite_score": 0.31,
+                "tier": "B",
+            },
+            source="CBOE fixture",
+            as_of="2026-08-29T12:00:00+00:00",
+            note=(
+                "Index/fund candidate shown as market context because baskets have no "
+                "issuer, analyst-coverage, or insider-filing legs."
+            ),
+        )
+    ]
+    html = render_dashboard_html(payload)
 
-    It was renamed from `..._places_grade_next_to_tier`, and the rename is the point: the
-    badge was removed by decision, not by accident, so a test asserting its adjacency to
-    the grade would now pin the wrong behaviour.
+    assert "SPY market context" in html
+    assert "implied volatility pct" in html
+    assert "expected move points" in html
+    assert "baskets have no issuer" in html
+    assert '<dl class="metric-fields">' in html
 
-    Why it went: with `REQUIRED_COMPONENTS` at `{S_O, S_M}` every row is Tier A and the
-    ceiling binds nothing. Requiring `S_S` was tried and reverted -- it returned 0 A / 16 B
-    / 2 C on live run `daily-2026-09-06-e270378b`, because `S_S` is `aggregator`-sourced by
-    construction and can never qualify a row for Tier A. Either way the badge is constant
-    across the universe, so the grade carries confidence on its own.
 
-    Tier is still rendered in the diagnostic sections (setups, matrix, prior scorecard),
-    where it sits beside the reasons that produced it.
-    """
+def test_dashboard_html_ideas_table_scrolls_and_separates_the_two_scales() -> None:
+    """Conviction and certainty are separate display values, never a combined grade."""
 
     html = render_dashboard_html(dashboard_payload())
     parser = parse_dashboard_html(html)
@@ -402,19 +422,28 @@ def test_dashboard_html_ideas_table_scrolls_and_carries_no_tier_badge() -> None:
     assert "overflow-x: auto;" in html
     assert "overflow-x: hidden;" in html
     assert "Tier" not in ideas_rows[0]
-    assert ideas_rows[0][1:5] == ["Status", "Setup", "Direction", "Grade"]
-    assert ideas_rows[1][1:5] == [
+    assert ideas_rows[0][1:7] == [
+        "Status",
+        "Setup",
+        "Thesis",
+        "Data reads",
+        "Conviction",
+        "Certainty",
+    ]
+    assert ideas_rows[1][1:7] == [
         "TRADEABLE",
         "EVENT_DIRECTIONAL_LONG",
         "long",
-        "B+ (77.4)",
+        "moderate_bullish (+0.62)",
+        "77.4",
+        "B+",
     ]
     assert "1 of 3 legs" in html
     assert "fixture leg counts describe the fixture, not live sourcing" in html
     assert "executive_tone: no transcript source available" in html
 
 
-def test_dashboard_html_publishes_the_direction_the_grade_was_computed_against() -> None:
+def test_dashboard_html_publishes_the_declared_thesis_direction() -> None:
     """`alignment()` branches on direction, and `beyond +/-1 sigma` does not imply it.
 
     Without this column a skew structure carrying a real LONG direction and a NEUTRAL
@@ -431,7 +460,7 @@ def test_dashboard_html_publishes_the_direction_the_grade_was_computed_against()
             grade_score=77.4,
         ),
         TradingIdeaRow(
-            ticker="SPY",
+            ticker="MSFT",
             status="TRADEABLE",
             direction="neutral",
             thesis_band="beyond +1 sigma",
@@ -444,12 +473,21 @@ def test_dashboard_html_publishes_the_direction_the_grade_was_computed_against()
         render_dashboard_html(dashboard_payload(trading_ideas=rows))
     )
     table = parser.rows_by_section["trading-ideas"]
-    column = table[0].index("Direction")
+    column = table[0].index("Thesis")
 
     assert [row[column] for row in table[1:]] == ["long", "neutral", "unavailable"]
     # Same band, same grade columns to a reader's eye - only direction separates them.
-    thesis = table[0].index("Thesis")
+    thesis = table[0].index("P(thesis band)")
     assert table[1][thesis] == table[2][thesis]
+
+
+def test_dashboard_html_presents_probability_as_context_not_grade_formula() -> None:
+    html = render_dashboard_html(dashboard_payload())
+    parser = parse_dashboard_html(html)
+
+    assert "P(thesis band)" in parser.rows_by_section["trading-ideas"][0]
+    assert "probability with alignment" not in html.lower()
+    assert "grade combines" not in html.lower()
 
 
 def mixed_formula_ideas() -> list[TradingIdeaRow]:
@@ -460,7 +498,7 @@ def mixed_formula_ideas() -> list[TradingIdeaRow]:
     """
     return [
         TradingIdeaRow(
-            ticker="QQQ",
+            ticker="CRWV",
             grade_letter="B",
             grade_score=67.89,
             tier="A",
@@ -498,27 +536,34 @@ def ideas_row_html(html: str, ticker: str) -> str:
     return next(fragment for fragment in rows if f">{ticker}</td>" in fragment)
 
 
-def test_dashboard_html_grade_cell_names_how_many_components_scored_it() -> None:
-    """A reader must see that QQQ's grade is a 2-component number and MSFT's a 4."""
+def test_dashboard_html_component_coverage_is_visible_beside_conviction() -> None:
+    """A reader must see that CRWV's conviction has 2 components and MSFT's has 4."""
     parser = parse_dashboard_html(
         render_dashboard_html(dashboard_payload(trading_ideas=mixed_formula_ideas()))
     )
-    grade_column = parser.rows_by_section["trading-ideas"][0].index("Grade")
-    grades = {
-        row[0]: row[grade_column]
+    header = parser.rows_by_section["trading-ideas"][0]
+    conviction_column = header.index("Conviction")
+    component_column = header.index("Components")
+    convictions = {
+        row[0]: row[conviction_column]
+        for row in parser.rows_by_section["trading-ideas"][1:]
+    }
+    components = {
+        row[0]: row[component_column]
         for row in parser.rows_by_section["trading-ideas"][1:]
     }
 
-    assert grades["QQQ"] == "B (67.89) 2/5"
-    assert grades["ORCL"] == "F (34.75) 3/5"
-    assert grades["MSFT"] == "A (83.82) 4/5"
+    assert convictions == {"CRWV": "67.89", "ORCL": "34.75", "MSFT": "83.82"}
+    assert "2/5" in components["CRWV"]
+    assert "3/5" in components["ORCL"]
+    assert "4/5" in components["MSFT"]
 
 
 def test_dashboard_html_flags_rows_graded_on_fewer_than_three_components() -> None:
     html = render_dashboard_html(dashboard_payload(trading_ideas=mixed_formula_ideas()))
 
-    assert 'class="thin-evidence"' in ideas_row_html(html, "QQQ")
-    assert "comp-count thin" in ideas_row_html(html, "QQQ")
+    assert 'class="thin-evidence"' in ideas_row_html(html, "CRWV")
+    assert "comp-count thin" in ideas_row_html(html, "CRWV")
     for ticker in ("ORCL", "MSFT"):
         assert "thin-evidence" not in ideas_row_html(html, ticker)
         assert "comp-count thin" not in ideas_row_html(html, ticker)
@@ -528,11 +573,8 @@ def test_dashboard_html_flags_rows_graded_on_fewer_than_three_components() -> No
 def test_dashboard_html_explains_the_component_count_in_a_legend() -> None:
     html = render_dashboard_html(dashboard_payload(trading_ideas=mixed_formula_ideas()))
 
-    legend = " ".join(
-        html.split('<p class="legend', 1)[1].split("</p>", 1)[0].split()
-    )
-    assert "remaining weights renormalised" in legend
-    assert "fewer than 3 components are highlighted" in legend
+    assert "remaining weights renormalised" in html
+    assert "fewer than 3 components are highlighted" in html
 
 
 def test_dashboard_html_omits_the_component_count_for_an_unscored_row() -> None:
@@ -547,4 +589,113 @@ def test_dashboard_html_omits_the_component_count_for_an_unscored_row() -> None:
     header = parser.rows_by_section["trading-ideas"][0]
     row = parser.rows_by_section["trading-ideas"][1]
 
-    assert row[header.index("Grade")] == "unavailable"
+    assert row[header.index("Conviction")] == "unavailable"
+    assert row[header.index("Certainty")] == "unavailable"
+    assert row[header.index("Components")] == "unavailable"
+
+
+def test_dashboard_html_explains_and_renders_conviction_and_certainty_separately() -> None:
+    row = TradingIdeaRow(
+        ticker="INTC",
+        status="WATCHLIST",
+        direction="long",
+        posture="moderate_bullish",
+        composite_score=0.465,
+        grade_score=100.0,
+        grade_letter="C",
+    )
+    html = render_dashboard_html(dashboard_payload(trading_ideas=[row]))
+    table = parse_dashboard_html(html).rows_by_section["trading-ideas"]
+    header = table[0]
+
+    assert table[1][header.index("Conviction")] == "100.0"
+    assert table[1][header.index("Certainty")] == "C"
+    assert "C (100.0)" not in html
+    assert "Conviction" in html and "Certainty" in html
+    assert "data-quality letter" in html
+
+
+def test_dashboard_html_marks_only_theses_that_disagree_with_the_data_reading() -> None:
+    rows = [
+        TradingIdeaRow(
+            ticker="GOOGL",
+            status="WATCHLIST",
+            direction="long",
+            posture="neutral",
+            composite_score=-0.094,
+            grade_score=0.0,
+            grade_letter="C",
+        ),
+        TradingIdeaRow(
+            ticker="INTC",
+            status="WATCHLIST",
+            direction="long",
+            posture="moderate_bullish",
+            composite_score=0.465,
+            grade_score=100.0,
+            grade_letter="C",
+        ),
+    ]
+    table = parse_dashboard_html(
+        render_dashboard_html(dashboard_payload(trading_ideas=rows))
+    ).rows_by_section["trading-ideas"]
+    header = table[0]
+    readings = {row[0]: row[header.index("Data reads")] for row in table[1:]}
+
+    assert "thesis disagrees with data" in readings["GOOGL"]
+    assert "thesis disagrees with data" not in readings["INTC"]
+
+
+def test_dashboard_html_renders_partial_run_health_banner() -> None:
+    payload = dashboard_payload()
+    payload.run_health = RunHealth(
+        components_scored=14,
+        components_defined=16,
+        names_scored=17,
+        names_gated=18,
+        providers_answered=["fmp"],
+        providers_expected=["fmp", "finnhub"],
+    )
+
+    html = render_dashboard_html(payload)
+
+    assert 'id="run-health"' in html
+    assert "Partial run: the report is incomplete." in html
+    assert "Scored 14 of 16 components and 17 of 18 gated names." in html
+    assert "2 components; 1 gated names; providers finnhub did not answer." in html
+    assert "DATA PROVIDER OUTAGE" not in html
+
+
+def test_dashboard_html_renders_total_provider_outage_banner() -> None:
+    payload = dashboard_payload()
+    payload.run_health = RunHealth(
+        components_scored=0,
+        components_defined=16,
+        names_scored=0,
+        names_gated=18,
+        providers_answered=[],
+        providers_expected=["fmp", "finnhub", "alpha_vantage"],
+        total_provider_outage=True,
+    )
+
+    html = render_dashboard_html(payload)
+
+    assert "DATA PROVIDER OUTAGE: no expected provider answered." in html
+    assert "built without live provider data" in html
+    assert "must not be treated as a normal daily briefing" in html
+
+
+def test_dashboard_html_omits_run_health_banner_for_a_clean_or_legacy_run() -> None:
+    legacy_html = render_dashboard_html(dashboard_payload())
+    clean_payload = dashboard_payload()
+    clean_payload.run_health = RunHealth(
+        components_scored=16,
+        components_defined=16,
+        names_scored=18,
+        names_gated=18,
+        providers_answered=["fmp", "finnhub"],
+        providers_expected=["fmp", "finnhub"],
+    )
+
+    assert 'id="run-health"' not in legacy_html
+    assert 'id="run-health"' not in render_dashboard_html(clean_payload)
