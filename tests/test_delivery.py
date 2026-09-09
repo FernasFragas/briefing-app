@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from briefing_app.api import app
-from briefing_app.delivery import DeliveryError, publish_static_artifacts
+from briefing_app.delivery import DeliveryError, PUBLISHABLE_STATUSES, publish_static_artifacts
 
 
 def test_static_delivery_publishes_latest_and_archive_paths(tmp_path) -> None:
@@ -61,6 +61,14 @@ def test_static_delivery_endpoint_requires_token_and_returns_error_contract(
     client = TestClient(app)
 
     assert client.post("/delivery/static", json=payload).status_code == 401
+    assert (
+        client.post(
+            "/delivery/static",
+            json=payload,
+            headers={"Authorization": "Bearer wrong-token"},
+        ).status_code
+        == 401
+    )
 
     response = client.post(
         "/delivery/static",
@@ -88,6 +96,73 @@ def test_static_delivery_endpoint_requires_token_and_returns_error_contract(
     }
 
 
+def test_mutating_endpoints_fail_closed_when_run_token_env_is_unset(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("APP_RUN_TOKEN", raising=False)
+    monkeypatch.setenv("APP_RUN_TOKEN_FILE", str(tmp_path / "run-token"))
+
+    calls = {"daily": 0, "weekly": 0, "preflight": 0}
+
+    def daily_would_start(*args, **kwargs):  # noqa: ANN002, ANN003
+        calls["daily"] += 1
+        raise AssertionError("daily run should not start without auth")
+
+    def weekly_would_start(*args, **kwargs):  # noqa: ANN002, ANN003
+        calls["weekly"] += 1
+        raise AssertionError("weekly run should not start without auth")
+
+    class PreflightWouldStart:
+        def run(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            calls["preflight"] += 1
+            raise AssertionError("preflight should not start without auth")
+
+    monkeypatch.setattr("briefing_app.api.run_daily_pipeline", daily_would_start)
+    monkeypatch.setattr("briefing_app.api.run_weekly_pipeline", weekly_would_start)
+    monkeypatch.setattr("briefing_app.api.PreflightRunner", PreflightWouldStart)
+
+    client = TestClient(app)
+    responses = [
+        client.post("/run/daily"),
+        client.post("/run/weekly"),
+        client.post("/delivery/static", json={}),
+        client.post("/score/open-calls"),
+        client.post("/preflight"),
+    ]
+
+    assert [response.status_code for response in responses] == [401, 401, 401, 401, 401]
+    assert calls == {"daily": 0, "weekly": 0, "preflight": 0}
+    assert client.get("/health").status_code == 200
+
+
+def test_persisted_local_run_token_can_authorize_mutating_endpoint(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    output_root = tmp_path / "output"
+    payload = run_payload(output_root, container_paths=True)
+    token_file = tmp_path / "run-token"
+    monkeypatch.delenv("APP_RUN_TOKEN", raising=False)
+    monkeypatch.setenv("APP_RUN_TOKEN_FILE", str(token_file))
+    monkeypatch.setenv("BRIEFING_OUTPUT_DIR", str(output_root))
+    client = TestClient(app)
+
+    assert client.post("/delivery/static", json=payload).status_code == 401
+
+    token = token_file.read_text(encoding="utf-8").strip()
+    response = client.post(
+        "/delivery/static",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    delivered = response.json()
+    assert Path(delivered["latest_html_path"]).exists()
+    assert Path(delivered["latest_json_path"]).exists()
+
+
 def test_app_daily_endpoint_output_can_be_published_by_static_delivery(
     tmp_path,
     monkeypatch,
@@ -108,7 +183,7 @@ def test_app_daily_endpoint_output_can_be_published_by_static_delivery(
     )
     assert run_response.status_code == 200
     run_output = run_response.json()
-    assert run_output["status"] == "succeeded"
+    assert run_output["status"] in PUBLISHABLE_STATUSES
     assert Path(run_output["html_path"]).exists()
     assert Path(run_output["json_path"]).exists()
 
