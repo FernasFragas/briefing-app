@@ -1,5 +1,9 @@
 # How To Run With n8n Cloud
 
+This is an archived hosted reference, not the D1 local release path. The local release
+uses `launchd` and `ops/run_daily.py`; the bounded prose layer is present in code but not
+wired into the shipped briefing.
+
 This guide covers the hosted n8n path. In this setup your laptop is not part of the
 daily run.
 
@@ -92,10 +96,10 @@ Pick one hosting target:
 - A VPS is also fine, but then you are self-hosting infrastructure again.
 
 For the broader local, hosted, and LangChain orchestration choices, see
-[DEPLOYMENT_OPTIONS.md](../docs/DEPLOYMENT_OPTIONS.md).
+[DEPLOYMENT_OPTIONS.md](../docs/operations/DEPLOYMENT_OPTIONS.md).
 
 For Fly.io specifically, use
-[DEPLOY_FLY_IO.md](../docs/DEPLOY_FLY_IO.md). The short version is:
+[DEPLOY_FLY_IO.md](../docs/operations/DEPLOY_FLY_IO.md). The short version is:
 
 ```text
 fly launch --no-deploy --dockerfile Dockerfile
@@ -392,7 +396,7 @@ Before trusting the cloud workflow:
 - Hosted app can reach `https://ollama.com/api/chat`.
 - Ollama Cloud key is set only on the app host.
 - Preflight has been run and source statuses are understood:
-  [SOURCE_STATUS.md](../docs/SOURCE_STATUS.md).
+  [SOURCE_STATUS.md](../docs/research/SOURCE_STATUS.md).
 - Dashboard delivery returns a public URL or sends a real notification.
 - Error branch includes `run_id`, `stage`, `ticker`, and `reason`.
 - Managed Postgres backups are enabled.

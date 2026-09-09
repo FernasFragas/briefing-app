@@ -274,8 +274,8 @@ candidates:
     inactive: true
     inactive_reason: >-
       EU coverage deferred: no free EU per-strike option chain or national OAM
-      automation is available; see docs/alternatives/pa5-eu-sources.md and
-      docs/alternatives/pb5-fca-deferred.md.
+      automation is available; see docs/research/alternatives/pa5-eu-sources.md and
+      docs/research/alternatives/pb5-fca-deferred.md.
     name: Rheinmetall AG
     venue: XETRA
     geography: EU
@@ -304,8 +304,8 @@ candidates:
     inactive: true
     inactive_reason: >-
       EU coverage deferred: no free EU per-strike option chain or national OAM
-      automation is available; see docs/alternatives/pa5-eu-sources.md and
-      docs/alternatives/pb5-fca-deferred.md.
+      automation is available; see docs/research/alternatives/pa5-eu-sources.md and
+      docs/research/alternatives/pb5-fca-deferred.md.
     name: Leonardo S.p.A.
     venue: BORSA_ITALIANA
     geography: EU
@@ -332,12 +332,12 @@ candidates:
     inactive: true
     inactive_reason: >-
       EU coverage deferred: no free EU per-strike option chain or national OAM
-      automation is available; see docs/alternatives/pa5-eu-sources.md and
-      docs/alternatives/pb5-fca-deferred.md.
+      automation is available; see docs/research/alternatives/pa5-eu-sources.md and
+      docs/research/alternatives/pb5-fca-deferred.md.
 
   - ticker: SIE.DE
     inactive: true
     inactive_reason: >-
       EU coverage deferred: no free EU per-strike option chain or national OAM
-      automation is available; see docs/alternatives/pa5-eu-sources.md and
-      docs/alternatives/pb5-fca-deferred.md.
+      automation is available; see docs/research/alternatives/pa5-eu-sources.md and
+      docs/research/alternatives/pb5-fca-deferred.md.

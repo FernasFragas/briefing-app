@@ -82,17 +82,18 @@ instance.
 
 ## Ollama Choices
 
-For the briefing app itself, the recommended setup is Ollama Cloud:
+The shipped local briefing does not call the bounded prose layer. Leave these app LLM
+settings blank unless `BriefingLLM` is intentionally wired later:
 
 ```text
-LLM_PROVIDER=ollama
-OLLAMA_BASE_URL=https://ollama.com
-OLLAMA_MODEL=gpt-oss:120b
-OLLAMA_API_KEY=<ollama-cloud-api-key>
+LLM_PROVIDER=
+OLLAMA_BASE_URL=
+OLLAMA_MODEL=
+OLLAMA_API_KEY=
 ```
 
-In this mode, n8n does not call Ollama. n8n calls the FastAPI app, and the app calls
-Ollama Cloud from its own environment.
+The n8n Assistant is separate from the briefing run. If you want the Assistant to use a
+local Ollama daemon, configure that only in the n8n Assistant model screen.
 
 For the n8n Assistant model screen with a local Ollama daemon, use the
 OpenAI-compatible local endpoint:

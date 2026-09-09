@@ -265,7 +265,7 @@ STATUS_BUDGET_EXHAUSTED = "budget_exhausted"
 # `partial` the new constant and carry exactly as little information as `succeeded` did.
 #
 # Every recording point is therefore classified. The full table, with the reasoning for
-# each line, is `docs/RUN-HEALTH.md`; `_issue_severity` below is that table in code.
+# each line, is `docs/architecture/RUN-HEALTH.md`; `_issue_severity` below is that table in code.
 # --------------------------------------------------------------------------------------
 
 #: An expected condition of a healthy system. Recorded, never escalated.
@@ -2790,7 +2790,7 @@ class LiveDataSource:
         FINRA's consolidated file carries daily short **volume** only, so the snapshot it
         produces sets `short_volume_ratio` and leaves short interest, days-to-cover and
         borrow fee `None`. Those three have no free source; see
-        `docs/alternatives/pa1-borrow.md`.
+        `docs/research/alternatives/pa1-borrow.md`.
         """
 
         for provider in _provider_order(config, "short_interest"):
@@ -3172,7 +3172,7 @@ def _expected_providers(source: Any, config: AppConfig) -> tuple[str, ...]:
 def _issue_severity(issue: str) -> str:
     """Classify one per-ticker issue as `normal`, `degraded` or `outage`.
 
-    This function *is* the table in `docs/RUN-HEALTH.md`. Change one and change the other,
+    This function *is* the table in `docs/architecture/RUN-HEALTH.md`. Change one and change the other,
     or the document stops being arguable-with, which was the point of writing it down.
     """
 

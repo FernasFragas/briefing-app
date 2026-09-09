@@ -1,22 +1,30 @@
 # n8n Workflows
 
-See `HOW_TO_RUN_WITH_N8N.md` for the full local runbook.
+The shipped local scheduler is `launchd`; see `../docs/operations/LOCAL-OPS.md`.
+
+These n8n exports are retained as optional/manual workflow runners. They are inactive in
+the JSON exports and should not be enabled while the `launchd` job is installed, or the
+daily run can fire twice.
+
+See `HOW_TO_RUN_WITH_N8N.md` for the optional local n8n runbook.
 See `N8N_ASSISTANT_SETUP.md` for the optional local n8n Assistant model, sandbox,
 and web search setup.
-See `HOW_TO_RUN_WITH_N8N_CLOUD.md` for the hosted n8n Cloud runbook.
-See `../docs/DEPLOY_FLY_IO.md` for deploying the FastAPI app to Fly.io and
+See `HOW_TO_RUN_WITH_N8N_CLOUD.md` only as an archived hosted reference; it is not the
+release path under D1.
+See `../docs/operations/DEPLOY_FLY_IO.md` for deploying the FastAPI app to Fly.io and
 connecting n8n to it.
-See `../docs/DEPLOYMENT_OPTIONS.md` for local, n8n Cloud, Fly.io, and LangChain
+See `../docs/operations/DEPLOYMENT_OPTIONS.md` for local, n8n Cloud, Fly.io, and LangChain
 orchestration choices.
-See `../docs/SOURCE_STATUS.md` for the current source reachability status and fixes.
+See `../docs/research/SOURCE_STATUS.md` for the current source reachability status and fixes.
 
 The local Docker Compose stack also includes the official n8n Assistant sandbox
 and web search services. In the n8n sandbox dialog, use `http://sandbox-api:8080`
 and the value of `N8N_SANDBOX_SERVICE_API_KEY` from `.env`.
 For the web search dialog, select SearXNG and use `http://searxng:8080`.
 
-Import `briefing_daily_delivery.json` into n8n for the weekday run. Import
-`briefing_weekly_delivery.json` only when a weekly dashboard is wanted.
+Import `briefing_daily_delivery.json` into n8n only for manual workflow testing or if
+you intentionally replace the `launchd` scheduler. Import `briefing_weekly_delivery.json`
+only when a weekly dashboard is wanted.
 
 The workflows use these environment variables from `docker-compose.yml`:
 
@@ -41,9 +49,5 @@ Successful daily or weekly runs are published by the app into:
 - `output/published/latest/dashboard.json`
 - `output/published/latest/manifest.json`
 
-For Ollama Cloud prose generation, configure the FastAPI app environment, not n8n:
-
-- `LLM_PROVIDER=ollama`
-- `OLLAMA_BASE_URL=https://ollama.com`
-- `OLLAMA_MODEL=gpt-oss:120b`
-- `OLLAMA_API_KEY=<ollama-cloud-api-key>`
+The bounded prose layer is present in code but deliberately unwired for the local release.
+Do not configure LLM keys for the shipped briefing unless that layer is wired later.

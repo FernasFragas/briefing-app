@@ -364,7 +364,7 @@ class ProvidersSettings(BaseModel):
     political: list[ProviderName] = Field(default_factory=lambda: ["fmp"])
     retail: list[ProviderName] = Field(default_factory=lambda: ["apewisdom"])
     #: FINRA's consolidated file is free, unmetered and needs no key, so it leads by
-    #: default. It carries daily short *volume* only - see `docs/alternatives/pa1-borrow.md`.
+    #: default. It carries daily short *volume* only - see `docs/research/alternatives/pa1-borrow.md`.
     short_interest: list[ProviderName] = Field(default_factory=lambda: ["finra"])
 
     @field_validator("*", mode="before")

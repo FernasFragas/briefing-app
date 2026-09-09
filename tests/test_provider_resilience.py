@@ -1,7 +1,7 @@
 """Throughput failures, and what the client does about them.
 
 Every case here is drawn from live run `daily-2026-09-03-c7e82663`, recorded as
-`PC1-RAW-15` through `PC1-RAW-19` in `docs/alternatives/still-failing.md`. All three
+`PC1-RAW-15` through `PC1-RAW-19` in `docs/archive/still-failing.md`. All three
 defects share a shape: the entitlement was fine, the provider answered, and the pipeline
 still lost the reading because nothing remembered what the answer had been.
 """

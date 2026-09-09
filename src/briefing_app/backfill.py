@@ -59,7 +59,7 @@ DEFAULT_COMPLETED_RUN_RESERVE = 6
 #: `providers/base.py` parks an endpoint after two identical refusals, but only for
 #: statuses in `REPEATABLE_REFUSAL_STATUSES`, which is `{malformed}` alone. Alpha
 #: Vantage answers `HISTORICAL_OPTIONS` on a free key with a plausible sample payload
-#: that validates as `synthetic` (`docs/SOURCE_STATUS.md`), and nothing parks that. Left
+#: that validates as `synthetic` (`docs/research/SOURCE_STATUS.md`), and nothing parks that. Left
 #: unbounded, one such backfill spends every remaining request of the day, stores
 #: nothing, and starves the live run — the exact outcome J2 exists to prevent.
 MAX_CONSECUTIVE_FAILURES = 3

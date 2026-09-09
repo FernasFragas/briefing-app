@@ -72,7 +72,7 @@ DEFAULT_BUDGETS.update(
         # symbol at a time as an FMP symbol-gate fallback.
         "twelve_data": ProviderBudgetPolicy(daily_requests=800, min_interval_seconds=7.6),
         # FRED publishes no numeric per-minute or daily cap in its API docs - only that
-        # rate limiting answers HTTP 429 (`docs/alternatives/pa9-macro.md`). So no daily
+        # rate limiting answers HTTP 429 (`docs/research/alternatives/pa9-macro.md`). So no daily
         # count is invented here, and the pacing is the conservative budgeting that note
         # asks for. It matters more now the macro calendar asks `release/dates` twice per
         # release - once backwards to date a reading, once forwards to schedule one.

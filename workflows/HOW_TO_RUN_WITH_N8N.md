@@ -1,6 +1,10 @@
 # How To Run The Briefing App With n8n
 
-This runbook starts the local stack, imports the n8n workflow, runs it manually, and
+This is an optional n8n runbook. The shipped local scheduler is `launchd` through
+`ops/run_daily.py`; see `../docs/operations/LOCAL-OPS.md`. Do not enable the n8n schedule while the
+`launchd` job is installed unless you intentionally want duplicate daily runs.
+
+This runbook starts the local stack, imports the n8n workflow for manual testing, and
 shows where the delivered dashboard files land. It also lists the optional local n8n
 Assistant setup values for model, sandbox, and web search.
 
@@ -55,25 +59,17 @@ FINNHUB_API_KEY=
 TWELVE_DATA_API_KEY=
 ```
 
-OpenAI and Anthropic keys are only needed if you choose those legacy LLM providers:
+OpenAI, Anthropic, and Ollama app keys are reserved for future prose wiring. The shipped
+local briefing does not call `BriefingLLM`, so leave them blank:
 
 ```text
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
+LLM_PROVIDER=
+OLLAMA_BASE_URL=
+OLLAMA_MODEL=
+OLLAMA_API_KEY=
 ```
-
-To use Ollama Cloud for LLM prose instead of OpenAI or Anthropic, set:
-
-```text
-LLM_PROVIDER=ollama
-OLLAMA_BASE_URL=https://ollama.com
-OLLAMA_MODEL=gpt-oss:120b
-OLLAMA_API_KEY=<ollama-cloud-api-key>
-```
-
-With this cloud path, you do not need a local Ollama container. The app calls
-`https://ollama.com/api/chat` directly. Keep the Ollama key in the app environment;
-n8n only needs `APP_RUN_TOKEN` to trigger the app.
 
 The optional n8n Assistant sandbox and web search services are already configured in
 `.env.example`:
@@ -219,9 +215,11 @@ output/dashboard/<run-date>/dashboard.json
 output/published/<run-date>/<run-id>/
 ```
 
-## 6. Enable The Schedule
+## 6. Do Not Enable The Schedule For The Shipped Local Setup
 
-After a manual execution succeeds:
+For the release path, install the `launchd` job in `../docs/operations/LOCAL-OPS.md` instead.
+
+If you intentionally use n8n instead of `launchd`, enable only one scheduler:
 
 1. Open the imported daily workflow in n8n.
 2. Toggle it to active.
@@ -294,8 +292,8 @@ No published files:
 
 n8n cannot reach Ollama:
 
-- If you are using this app normally, n8n should not call Ollama directly. n8n should
-  call `http://app:8000/run/daily`; the app calls Ollama using its own environment.
+- If you are using the shipped local briefing, neither n8n nor the app should call
+  Ollama. The prose layer is present but not wired.
 - If you are configuring the n8n Assistant at `http://localhost:5678/assistant`, use
   Ollama's OpenAI-compatible endpoint:
 
@@ -450,8 +448,9 @@ Finnhub, Twelve Data, FINRA, SEC EDGAR, and Alpha Vantage fallbacks for price hi
 calendars, news, insider, analyst, macro, and borrow-proxy inputs when those credentials
 or cached payloads are available. `S_F` ownership remains blocked by design.
 
-LLM prose generation is separate from fixture market data. Fixture runs can use
-`LLM_PROVIDER=ollama` with Ollama Cloud.
+LLM prose generation is separate from fixture market data and is deliberately unwired in
+the shipped local briefing. Fixture runs should leave `LLM_PROVIDER` blank unless that
+layer is intentionally wired later.
 
 ## References
 

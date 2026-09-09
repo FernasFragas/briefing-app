@@ -64,7 +64,7 @@ class FredClient(BaseProviderClient):
     so requests are kept to one per series per run and cached like every other source.
 
     There is also a keyless path (`fredgraph.csv`) serving the same series, documented in
-    `docs/alternatives/pa9-macro-keyless-alternative.md`. It is not used here because a key
+    `docs/research/alternatives/pa9-macro-keyless-alternative.md`. It is not used here because a key
     is configured, and because only the keyed API serves the release calendar.
     """
 

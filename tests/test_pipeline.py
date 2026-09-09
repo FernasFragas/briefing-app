@@ -377,7 +377,7 @@ def _lane_c_option_quotes(expiry: date) -> list[OptionQuote]:
 # ---------------------------------------------------------------------------------------
 # Lane G / D9 - run health.
 #
-# `ISSUE_SEVERITY_POINTS` is the table in `docs/RUN-HEALTH.md`, one row per
+# `ISSUE_SEVERITY_POINTS` is the table in `docs/architecture/RUN-HEALTH.md`, one row per
 # `issues.append` in `pipeline.py`, keyed by the source line so the two can be diffed.
 # It exists so the classification is argued with here rather than rediscovered by a
 # reader wondering why yesterday's run said `partial`.
@@ -444,7 +444,7 @@ def test_every_issue_recording_point_has_a_declared_severity() -> None:
     documented = {line for line, _, _ in ISSUE_SEVERITY_POINTS}
 
     assert recording_lines == documented, (
-        "docs/RUN-HEALTH.md and this table must be updated together with pipeline.py; "
+        "docs/architecture/RUN-HEALTH.md and this table must be updated together with pipeline.py; "
         f"undocumented: {sorted(recording_lines - documented)}, "
         f"stale: {sorted(documented - recording_lines)}"
     )

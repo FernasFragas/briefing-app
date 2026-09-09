@@ -2,8 +2,9 @@
 
 Options-first trading briefing application that loads a configured universe, validates
 market-data sources, computes component scores and strategy setups, then publishes
-auditable dashboard artifacts. n8n is used for scheduling and delivery; Python owns the
-actual pipeline logic.
+auditable dashboard artifacts. The shipped local scheduler is `launchd`; Python owns the
+pipeline and static publishing path. n8n remains available as an optional/manual workflow
+runner.
 
 ## Tech Stack
 
@@ -13,8 +14,8 @@ actual pipeline logic.
 - SQLAlchemy, psycopg, and Postgres
 - pandas, NumPy, and SciPy
 - Jinja2 dashboard rendering
-- Ollama Cloud for bounded LLM prose
-- Docker Compose for local app, Postgres, n8n, sandbox, and SearXNG
+- Bounded LLM prose guardrails are present but deliberately unwired for the local release
+- Docker Compose for optional local app, Postgres, n8n, sandbox, and SearXNG
 - SearXNG for local n8n Assistant web search
 - pytest for tests
 
@@ -29,23 +30,26 @@ graph LR
   CACHE --> SCORE[gate, components, scoring]
   SCORE --> STRAT[strategy setups]
   STRAT --> DASH[dashboard JSON and HTML]
-  DASH --> LLM[Ollama Cloud prose guard]
-  LLM --> DASH
+  DASH -. optional, unwired .-> LLM[bounded prose guard]
   DASH --> DB[(Postgres)]
   DASH --> OUT[output artifacts]
   OUT --> PUB[static delivery]
-  PUB --> N8N
+  PUB --> READER[local latest report]
+  N8N -. optional trigger .-> API
   N8N -. Assistant code .-> SANDBOX[n8n sandbox]
   N8N -. Assistant search .-> SEARCH[SearXNG]
 ```
 
-See [Architecture Design](docs/ARCHITECTURE.md) for the folder organization and more
+See [Architecture Design](docs/architecture/ARCHITECTURE.md) for the folder organization and more
 detail.
 
 ## Main Folders
 
 - `src/briefing_app/`: application code.
 - `config/`: example runtime configuration and source registry.
+- `docs/`: documentation for people to read — product, architecture, research, operations.
+- `tasks/`: work for agents to execute — lane documents, file ownership, verification results.
+- `ops/`: local operational scripts.
 - `workflows/`: n8n workflow exports and runbooks.
 - `migrations/`: Postgres schema migrations.
 - `schemas/`: manual capture schemas.
@@ -55,25 +59,35 @@ detail.
 
 ## Project Docs
 
-- Architecture: [ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- Deployment choices: [DEPLOYMENT_OPTIONS.md](docs/DEPLOYMENT_OPTIONS.md)
-- Source status and fixes: [SOURCE_STATUS.md](docs/SOURCE_STATUS.md)
+Documentation is split by who reads it and what they do with it. Full map:
+**[`docs/README.md`](docs/README.md)**.
+
+| Looking for | Go to |
+|---|---|
+| The traps a fresh session cannot infer from the code | [`HANDOFF.md`](HANDOFF.md) — **start here** |
+| Why something was decided, and what was rejected | [`docs/architecture/decisions/`](docs/architecture/decisions/) |
+| What is being built right now, and who owns which file | [`tasks/README.md`](tasks/README.md) |
+| What the report is meant to say | [`docs/product/`](docs/product/) |
+| How the system is put together | [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) |
+| Why a run reported `partial` | [`docs/architecture/RUN-HEALTH.md`](docs/architecture/RUN-HEALTH.md) |
+| Whether a data source works, or was already investigated | [`docs/research/`](docs/research/) |
+| How to run, back-fill or deploy it | [`docs/operations/`](docs/operations/) |
+| Something that used to be true | [`docs/archive/README.md`](docs/archive/README.md) |
 
 ## Local Run
 
-Run the full local stack with the FastAPI app, Postgres, n8n, and the n8n
-Assistant sandbox and web search services:
+For the local release, use the ops scripts:
 
 ```bash
 cp .env.example .env
-docker compose up -d --build
+PYTHONPATH=src .venv/bin/python ops/run_daily.py --data-mode live --force --max-tickers 1
+PYTHONPATH=src .venv/bin/python ops/status.py
 ```
 
-Then open:
+The stable report path is:
 
 ```text
-http://localhost:8000/health
-http://localhost:5678
+output/published/latest/dashboard.html
 ```
 
 Useful commands:
@@ -82,6 +96,9 @@ Useful commands:
 PYTHONPATH=src .venv/bin/python -m briefing_app.cli preflight
 PYTHONPATH=src .venv/bin/python -m briefing_app.cli run-daily --force --max-tickers 1
 PYTHONPATH=src .venv/bin/python -m briefing_app.cli run-daily --data-mode live --force --max-tickers 1
+PYTHONPATH=src .venv/bin/python ops/run_daily.py --data-mode live --force --max-tickers 1
+PYTHONPATH=src .venv/bin/python -m briefing_app.cli backfill-iv --dry-run
+PYTHONPATH=src .venv/bin/python ops/audit_dashboard.py output/published/latest/dashboard.json
 PYTHONPATH=src .venv/bin/python -m pytest
 ```
 
@@ -90,10 +107,18 @@ PYTHONPATH=src .venv/bin/python -m pytest
 and uses FMP, Twelve Data, Finnhub, FRED, FINRA, SEC EDGAR and Alpha Vantage fallbacks
 when those keys or public feeds are present.
 
+Optional Docker/n8n stack:
+
+```bash
+docker compose up -d --build
+```
+
+Then open `http://127.0.0.1:8000/health` or `http://127.0.0.1:5678`.
+
 ### Reading the graded ideas table
 
-The dashboard opens on a table of trading ideas, each carrying one certainty grade. Read it
-from the JSON artifact with:
+The dashboard opens on a table of trading ideas, each carrying a conviction score and a
+certainty grade. Read it from the JSON artifact with:
 
 ```bash
 jq -r '.trading_ideas[]
@@ -101,16 +126,24 @@ jq -r '.trading_ideas[]
   | @tsv' output/dashboard/$(date +%F)/dashboard.json | column -t -s$'\t'
 ```
 
-The grade combines the probability of the setup's own thesis band with how well `S_CTE`
-supports it, and is then **capped by the confidence tier**: Tier A can reach `A+`, Tier B
-stops at `B+`, Tier C stops at `C`. A high probability computed from unverified data
-therefore cannot present as a high-certainty idea. `grade_penalties` names each deduction,
-and `thesis_band` names the band the probability was read from — the column is
-`P(thesis band)`, never `P(profit)`.
+The grade is ALIGN: `100 * alignment`, less visible penalties. Alignment comes from
+`S_CTE` and the setup direction. `P(thesis band)` is still printed as scenario context,
+but contributes zero points to the grade. The confidence tier caps the displayed letter,
+not the numeric score: Tier A can show `A+`, Tier B stops at `B+`, and Tier C stops at
+`C`. Numeric `grade_score` keeps full resolution for sorting.
 
 Rows are ordered by actionability first: `TRADEABLE`, then `WATCHLIST`, then `BLOCKED`,
 then `UNSCORED`. Grade descending is the tie-break inside each status bucket, so a lower
 grade executable setup appears ahead of a higher-grade setup that cannot be traded today.
+
+The table shows two measurements, not one. **Conviction** is the uncapped 0-100 score of
+how strongly the evidence supports the declared idea; **certainty** is the letter that caps
+how far data quality lets that conviction be trusted. A row reading `100.0` and `C` is a
+high-support idea with a low confidence ceiling, not a contradiction. Beside them,
+**thesis** is the direction declared in the universe config and **data reads** is the
+composite posture the model computed independently; when the two disagree the row is
+explicitly marked, because the tool falsifying a declared thesis is a result rather than an
+error. See [REPORT-LAYOUT.md](docs/product/REPORT-LAYOUT.md).
 
 Directional theses use the favorable side of spot (`above spot` / `below spot`), not the
 one-sigma breakout tail. Volatility theses still use the sigma bands directly.
@@ -127,7 +160,25 @@ from the data source that ran rather than from the requested setting, so an expl
 can produce a dashboard but never a tradeable call.** Fixture mode also refuses to feed any
 leg the live path has no source for (`LIVE_UNSCORABLE_LEGS` in `pipeline.py`) — today
 `executive_tone` and the risk-reversal history — so a leg that scores in fixture mode is
-one that can score live.
+one that can score live. Non-live runs are refused at the `daily_snapshot` persistence
+boundary, so synthetic IV and put/call rows cannot contaminate the live baseline.
+
+### Run health and honest status
+
+A run that reached no providers used to report `succeeded` with zero diagnostics, because
+per-ticker problems accumulated in a local list that never reached the run status. They do
+now, classified by severity: a warm-up baseline still building is `normal` and leaves the
+run `succeeded`; a payload that arrived unusable is `degraded`; a source that was never
+reached is an `outage`. Anything above `normal` reaches the run diagnostics and marks the
+run `partial` through the status rule that already existed. Diagnostics are aggregated, so
+eighteen names missing prices is one line naming the eighteen rather than eighteen lines.
+
+Every run also publishes a completeness summary — components scored of components defined,
+names scored of names gated, and which providers answered — which the report renders as a
+banner at the top when the run is `partial`. A run where no provider answered at all gets
+distinct, stronger wording. A healthy run shows no banner. The severity of all 36 recording
+points is tabulated in [RUN-HEALTH.md](docs/architecture/RUN-HEALTH.md), and a newly added recording
+point fails the suite until it is classified.
 
 ### Live mode and provider plans
 
@@ -149,6 +200,19 @@ what each provider documents:
   `$BRIEFING_DATA_DIR/briefing.sqlite3`. That lets the self-built IV and put/call
   baselines warm up during ordinary local live runs. Set `BRIEFING_LOCAL_SQLITE=0` to
   keep the old no-database behavior.
+- **IV backfill is resumable, and guarded twice.** `briefing_app.cli backfill-iv` replays
+  historical option chains for gate-accepted US names, skips already stored sessions, and
+  builds rows through the same option-structure path as live runs — proved by
+  `tests/test_backfill.py::test_backfill_reproduces_a_row_the_live_path_stored`, which
+  reproduces a stored live row field for field. Two guards stand in front of it. It
+  reserves the daily run's request allowance and spends only the surplus, so a backfill
+  cannot starve the live run (`--live-run-reserve`). And it refuses to write when its
+  chains come from a different vendor than the live path's, because an IV rank is a
+  percentile of one series and splicing two vendors reports a confident wrong answer
+  (`--allow-vendor-splice` overrides, deliberately). Note that Alpha Vantage
+  `HISTORICAL_OPTIONS` is **not on the free tier** — it answers HTTP 200 with a sample
+  payload that validates as `synthetic` — so a free key cannot complete a backfill at any
+  speed. See [IV-BACKFILL.md](docs/operations/IV-BACKFILL.md).
 - **Premium endpoints are refused up front** when `ALPHA_VANTAGE_PLAN`, `FMP_PLAN`, or
   `TWELVE_DATA_PLAN` is `free`, so a metered key is never spent being told no. An endpoint
   that turns out to be plan-gated at runtime is recorded in
@@ -163,7 +227,7 @@ Free-plan coverage on the current keys, as measured rather than as documented:
 - **Alpha Vantage is not treated as dead.** It remains a metered fallback where useful,
   but the scheduled `HISTORICAL_PUT_CALL_RATIO` path was removed because it contributes
   nothing over self-built P/C baselines and spends the 25/day budget. See
-  `docs/SOURCE_STATUS.md`.
+  `docs/research/SOURCE_STATUS.md`.
 - **FMP** serves price history, earnings calendar, analyst and price-target consensus, the
   congressional disclosure feeds and macro indicators — but only for a subset of symbols
   (AAPL, MSFT, NVDA, LMT and SPY answer; AVGO, ORCL, MU, QQQ, CRWV and AMAT return HTTP
@@ -183,7 +247,7 @@ Free-plan coverage on the current keys, as measured rather than as documented:
   news, so tone is derived locally by `providers/news_tone.py` and labelled `local tone`
   rather than passed off as a vendor score.
 - **`S_F` (institutional) is declared permanently `n/a`** (Q4). It was blocked by design
-  rather than by wiring — `docs/alternatives/pb1-13f-blocker.md` — and closing it properly
+  rather than by wiring — `docs/research/alternatives/pb1-13f-blocker.md` — and closing it properly
   needs a curated filer universe, a table and a two-quarter diff for 0.10 of the US weight.
   Nothing is fetched for it, in either run mode, so nothing is spent; its weight is
   redistributed across the components that did score. The reason travels with the run in
@@ -191,7 +255,8 @@ Free-plan coverage on the current keys, as measured rather than as documented:
   expression classes `P` and `S`, so both stay Tier C while this stands; the shipped
   config enables only `V` and `E`.
 
-Full local+n8n setup: [HOW_TO_RUN_WITH_N8N.md](workflows/HOW_TO_RUN_WITH_N8N.md).
+Local operations and scheduler setup: [LOCAL-OPS.md](docs/operations/LOCAL-OPS.md).
+Optional local+n8n setup: [HOW_TO_RUN_WITH_N8N.md](workflows/HOW_TO_RUN_WITH_N8N.md).
 Optional n8n Assistant setup: [N8N_ASSISTANT_SETUP.md](workflows/N8N_ASSISTANT_SETUP.md).
 
 For the local n8n Assistant sandbox dialog, use:
@@ -209,21 +274,15 @@ Instance URL: http://searxng:8080
 
 ## Deploy
 
-Recommended hosted setup:
+The release target is local, single-reader operation on this machine. Hosted deployment is
+retained as an option, not the current shipping path.
 
-```text
-n8n Cloud -> Fly.io FastAPI app -> Ollama Cloud + providers + Postgres
-```
-
-Use Fly.io for the Python app, not for the local Docker Compose stack. n8n remains the
-scheduler and calls the app over HTTPS.
-
-- Fly.io app deployment: [DEPLOY_FLY_IO.md](docs/DEPLOY_FLY_IO.md)
+- Fly.io app deployment: [DEPLOY_FLY_IO.md](docs/operations/DEPLOY_FLY_IO.md)
 - n8n Cloud workflow setup: [HOW_TO_RUN_WITH_N8N_CLOUD.md](workflows/HOW_TO_RUN_WITH_N8N_CLOUD.md)
-- Deployment and orchestration options: [DEPLOYMENT_OPTIONS.md](docs/DEPLOYMENT_OPTIONS.md)
+- Deployment and orchestration options: [DEPLOYMENT_OPTIONS.md](docs/operations/DEPLOYMENT_OPTIONS.md)
 
 ## n8n
 
-- Local n8n guide: [HOW_TO_RUN_WITH_N8N.md](workflows/HOW_TO_RUN_WITH_N8N.md)
+- Local n8n guide, optional/manual: [HOW_TO_RUN_WITH_N8N.md](workflows/HOW_TO_RUN_WITH_N8N.md)
 - n8n Assistant guide: [N8N_ASSISTANT_SETUP.md](workflows/N8N_ASSISTANT_SETUP.md)
-- n8n Cloud guide: [HOW_TO_RUN_WITH_N8N_CLOUD.md](workflows/HOW_TO_RUN_WITH_N8N_CLOUD.md)
+- n8n Cloud guide, archived hosted reference: [HOW_TO_RUN_WITH_N8N_CLOUD.md](workflows/HOW_TO_RUN_WITH_N8N_CLOUD.md)

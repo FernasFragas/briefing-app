@@ -259,7 +259,7 @@ sources:
     # Official primary publisher rather than an aggregator, which is what upgrades S_M's
     # source-quality label. All series below verified entitled on a free key 2026-08-31.
     # A keyless path serving the same series exists (fredgraph.csv) and is documented in
-    # docs/alternatives/pa9-macro-keyless-alternative.md; only the keyed API carries the
+    # docs/research/alternatives/pa9-macro-keyless-alternative.md; only the keyed API carries the
     # release calendar.
     endpoints:
       - id: series_observations

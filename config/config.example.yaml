@@ -286,7 +286,7 @@ providers:
   political: [fmp]
   retail: [apewisdom]
   # FINRA's consolidated file is free and needs no key. It carries daily short *volume*
-  # only, scored as a labelled flow proxy - see docs/alternatives/pa1-borrow.md.
+  # only, scored as a labelled flow proxy - see docs/research/alternatives/pa1-borrow.md.
   short_interest: [finra]
 
 preflight:
