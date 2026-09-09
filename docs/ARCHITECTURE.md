@@ -88,7 +88,7 @@ src/briefing_app/
 ├── dashboard/               # Dashboard models, renderer, prompts, LLM guardrails
 ├── models/                  # Shared candidate, gate, market data, scoring models
 ├── options/                 # Options math and structure calculations
-├── providers/               # Alpha Vantage, CBOE, FMP, FINRA, SEC, manual providers
+├── providers/               # Alpha Vantage, CBOE, FMP, FRED, Finnhub, Twelve Data, FINRA, SEC, manual providers
 ├── strategy/                # Setup rules, scenarios, invalidation, leverage checks
 └── universe/                # Candidate loading, gate, rendering, and gate history
 ```

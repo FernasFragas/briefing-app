@@ -51,7 +51,7 @@ PYTHONPATH=src .venv/bin/python -m pytest
 PYTHONPATH=src .venv/bin/python -m pytest tests/test_grading.py tests/test_dashboard.py -q
 
 # Inspect the graded table from the JSON artifact
-jq -r '.trading_ideas[] | [.grade_letter,.grade_score,.ticker,.status,.headline] | @tsv' \
+jq -r '.trading_ideas[] | [.status,.ticker,.grade_letter,.grade_score,.headline] | @tsv' \
   output/dashboard/$(date +%F)/dashboard.json
 ```
 
@@ -89,16 +89,17 @@ present as high-certainty.
 
 ### Which probability counts as "the thesis"
 
-`ScenarioTable` exposes five bands. The thesis band is chosen by setup type, and the row
-**names the band it used** — the column is `P(thesis band)`, never `P(profit)`:
+`ScenarioTable` exposes five sigma bands plus derived side-of-spot probabilities. The
+thesis band is chosen by setup type, and the row **names the band it used** — the column is
+`P(thesis band)`, never `P(profit)`:
 
 | Setup type | Thesis band | Property |
 |---|---|---|
 | `SHORT_PREMIUM_IRON_CONDOR` | stays within ±1σ | `probability_in_one_sigma` |
 | `LONG_PREMIUM_STRADDLE`, `LONG_PREMIUM_CALENDAR`, `SKEW_STRUCTURE` | moves beyond ±1σ | `1 − probability_in_one_sigma` |
-| `EVENT_DIRECTIONAL_LONG`, `EVENT_DIRECTIONAL_VERTICAL` (long), `POSITIONAL_LONG` | beyond +1σ | `probability_above_one_sigma` |
-| `EVENT_DIRECTIONAL_PUT`, `BORROW_DEPENDENT_SHORT`, vertical (short) | beyond −1σ | `probability_below_one_sigma` |
-| `WATCHLIST_NO_TRADE` | **by `direction`** — see the amendment below | `probability_above_one_sigma` / `probability_below_one_sigma` / `probability_in_one_sigma` |
+| `EVENT_DIRECTIONAL_LONG`, `EVENT_DIRECTIONAL_VERTICAL` (long), `POSITIONAL_LONG` | above spot | `probability_above_spot` |
+| `EVENT_DIRECTIONAL_PUT`, `BORROW_DEPENDENT_SHORT`, vertical (short) | below spot | `probability_below_spot` |
+| `WATCHLIST_NO_TRADE` | **by `direction`** — see the amendments below | `probability_above_spot` / `probability_below_spot` / `probability_in_one_sigma` |
 
 No scenario table → `P = None` → the grade reports `n/a` with reason
 `NO_SCENARIO_TABLE`. A grade is never computed from a probability that does not exist.
@@ -110,18 +111,34 @@ As first written, this spec gave `WATCHLIST_NO_TRADE` no thesis band and graded 
 carries a scenario table**, so the original rule would have discarded a probability that
 exists on every row in the report.
 
-The band is therefore selected by `Setup.direction` for that type — `long` → beyond +1σ,
-`short` → beyond −1σ, `neutral` → within ±1σ. Type-based selection stays authoritative for
+The band is therefore selected by `Setup.direction` for that type — `long` → above spot,
+`short` → below spot, `neutral` → within ±1σ. Type-based selection stays authoritative for
 every other setup type; direction is the fallback, not a replacement. Tier ceilings still
 apply, so this cannot promote a watchlist row into tradeable territory.
+
+### Amendment, accepted 2026-09-02: directional setups use side-of-spot probability
+
+The 2026-08-31 amendment picked the right source of intent for `WATCHLIST_NO_TRADE`
+(`direction`) but the wrong probability for directional theses. A directional setup does
+not require a one-sigma breakout to be directionally right, and reading
+`probability_above_one_sigma` / `probability_below_one_sigma` as conviction mechanically
+capped a textbook directional setup below `C`.
+
+Directional setup types now read `probability_above_spot` or `probability_below_spot`.
+Those are derived from the existing scenario table as same-side tail mass plus the
+favorable share of the `within 1 sigma` band; when the stored band lacks bounds, the
+central band is split 50/50. Neutral and volatility setups keep their existing sigma-band
+definitions.
 
 ### Formula
 
 ```
-directional:  alignment = |S_CTE| if sign(S_CTE) matches the direction, else 0.0
-neutral:      alignment = 1.0 if |S_CTE| < NEUTRAL_BAND (0.15), else 0.0
+directional:  alignment = min(1, |S_CTE| / DIRECTIONAL_FULL_CONVICTION)
+                            if sign(S_CTE) matches the direction, else 0.0
+neutral:      alignment = max(0, 1 - |S_CTE| / NEUTRAL_BAND)
 
 raw        = 100 * (0.60 * P + 0.40 * alignment)
+directional raw uses 0.20 * P + 0.80 * alignment by default
 
 penalties  = 10  if the thesis band is in scenario_table.diverging_rows
                     (implied and measured sigma disagree)
@@ -131,15 +148,40 @@ penalties  = 10  if the thesis band is in scenario_table.diverging_rows
 score      = clamp(raw - penalties, 0, tier_ceiling)
 ```
 
-Weights `0.60 / 0.40` and both penalty magnitudes are config-tunable under a new
-`report.grading:` block, defaulting to the values above.
+Weights `0.60 / 0.40`, the directional probability weight `0.20`, and both penalty
+magnitudes are config-tunable under `report.grading:`, defaulting to the values above.
 
 The neutral case does not inherit `|S_CTE|` the way a directional one does, because a
 neutral thesis — price stays inside the range — is *supported* by a signal near zero and
-*contradicted* by a strong one. Reusing the directional rule would have scored a
-strongly-directional S_CTE as evidence for a range-bound trade. The threshold is the
-strategy engine's own `NEUTRAL_BAND`, so the report and the setup rules agree on what
-"neutral" means rather than each carrying a private definition.
+*contradicted* by a strong one. It is now continuous rather than binary: a row just
+inside the neutral band receives only a small alignment contribution. The threshold is
+the strategy engine's own `NEUTRAL_BAND`, so the report and the setup rules agree on
+what "neutral" means rather than each carrying a private definition.
+
+The two branches are normalised against different reference points on purpose. For a
+neutral thesis `NEUTRAL_BAND` genuinely is where support reaches zero: past the band edge
+the row has stopped being neutral. For a directional thesis it is the *opposite* end of
+the scale — the point of minimum conviction, not maximum — so the directional branch is
+normalised against `DIRECTIONAL_FULL_CONVICTION` (0.35, in `dashboard/grading.py`)
+instead. Dividing it by `NEUTRAL_BAND` saturated alignment at `|S_CTE| >= 0.15`, and with
+the 0.80 directional alignment weight every row past the band edge then scored at least
+80 raw regardless of its probability. 0.35 is the smallest denominator above the largest
+`|S_CTE|` observed on a live run (0.317), so no real row clips and the weak tail is
+depressed as little as possible; it is a named constant so it can be re-tuned once more
+runs exist.
+
+The denominator cannot close the gap between the two branches, and is not meant to. A
+directional raw score is `10 + 80 * alignment`, because `P(above spot)` sits near 0.50 by
+construction and carries only 0.20 weight, while a neutral row draws 30-52 points from a
+`P` that varies 0.50-0.86. Closing that head start needs a directional probability that
+actually varies — probability of reaching the setup's target rather than of finishing on
+one side of spot — which is a change to the scenario table, not to this constant.
+
+`alignment` keys off `direction`, not the thesis band, so `direction` is published on
+each `trading_ideas` row. For `above spot` / `below spot` / `within 1 sigma` the band
+implies the direction, but `beyond +/-1 sigma` covers both a NEUTRAL straddle and a
+directional skew structure; without the field those two rows publish identically and
+neither grade is reproducible.
 
 ### Bands and tier ceilings
 
@@ -159,17 +201,28 @@ would contradict the tier badge printed beside it.
 
 ## The Ideas Table
 
-One row per **scored** ticker, sorted by `grade_score` descending, `n/a` rows last.
+One row per **scored** ticker, sorted by actionability first:
+`TRADEABLE`, then `WATCHLIST`, then `BLOCKED`, then `UNSCORED`. Within each status bucket,
+rows are sorted by `grade_score` descending, with `n/a` rows last.
+
+### Amendment, accepted 2026-09-03: actionability outranks grade
+
+The 2026-09-03 live run produced four `TRADEABLE` rows graded `D`/`F` and six `A`/`B+`
+rows that were all `WATCHLIST` because IV rank history was still warming up. Sorting the
+headline table by grade alone made the first screen the least actionable part of the
+report. The grade remains the conviction score; the table order is now the execution
+order. That keeps a lower-grade executable setup above a higher-grade setup that cannot be
+traded today.
 
 | Column | Source |
 |---|---|
 | Ticker | — |
+| Status | `TRADEABLE` / `WATCHLIST` / `BLOCKED` / `UNSCORED` |
 | Idea | `SetupType` humanized, or `—` when unscored |
 | Grade | `A+`…`F` + numeric, or `n/a` |
-| P(thesis band) | with the band named, e.g. `0.68 within ±1σ` |
+| P(thesis band) | with the band named, e.g. `0.68 within ±1σ` or `0.50 above spot` |
 | S_CTE | signed |
 | Tier | A/B/C badge |
-| Status | `TRADEABLE` / `WATCHLIST` / `BLOCKED` / `UNSCORED` |
 | Catalyst | name + date + confirmed/estimated |
 | Why not tradeable | blank when TRADEABLE; else the reason |
 
@@ -196,7 +249,7 @@ Reworked `per_ticker_sections`, one block per stock in the universe:
 4. **Catalyst, invalidation, scenario bands.**
 5. **Prose** — LLM, unchanged, still behind `assert_authorized_numbers`.
 
-Point 3 is deliberate. `iv_extreme`, `short_borrow`, `executive_tone` and `retail_momentum`
+Point 3 is deliberate. `iv_extreme`, `short_borrow` and `executive_tone`
 currently renormalize out of their denominators and the matrix prints
 `missing_components: []`. The report is where that becomes visible. This spec does not
 change the scoring behaviour — that is ticket I15/A4 in
@@ -237,6 +290,7 @@ class TradingIdeaRow(BaseModel):
 
     ticker: str
     setup_type: str | None = None
+    direction: str | None = None            # the direction `alignment` branched on
     grade_letter: str | None = None
     grade_score: float | None = None
     thesis_probability: float | None = None
@@ -257,7 +311,7 @@ pytest, in `tests/`, no network. Fixture-driven, consistent with the existing su
 | Level | Coverage |
 |---|---|
 | Unit — `test_grading.py` | Every band boundary (34/35, 49/50, 57/58, 65/66, 73/74, 81/82, 89/90); each tier ceiling; P-selection for all 10 `SetupType` values; alignment sign logic; both penalties; `P is None` → `n/a` |
-| Contract — `test_dashboard.py` | `trading_ideas` present and sorted; `UNSCORED` always ungraded; `schema_version == "dashboard.v2"`; every existing section still populated |
+| Contract — `test_dashboard.py` | `trading_ideas` present and action-sorted; `UNSCORED` always ungraded; `schema_version == "dashboard.v2"`; every existing section still populated |
 | Render — `test_render.py` | Ideas table first in DOM order; detail sections inside `<details>`; empty-state renders "no scored ideas" not a blank table |
 | Guard — `test_dashboard.py` | Prose citing a grade passes `assert_authorized_numbers`; prose inventing one fails |
 
@@ -281,13 +335,15 @@ That is the single rule the whole design exists to enforce.
 1. `dashboard.html` opens on the graded ideas table; no scrolling needed to reach it.
 2. Every gate-accepted ticker appears exactly once, with a grade or an explicit `UNSCORED`.
 3. A Tier C name never renders above a `C`, at any probability. Enforced by test.
-4. Every non-`TRADEABLE` row states why, drawn from `RejectionCode` — never blank.
-5. Each component in the analysis section shows legs-scored-of-legs-defined, so a
+4. `TRADEABLE` rows render before `WATCHLIST`, `BLOCKED`, and `UNSCORED` rows even when a
+   later watchlist row has a higher grade.
+5. Every non-`TRADEABLE` row states why, drawn from `RejectionCode` — never blank.
+6. Each component in the analysis section shows legs-scored-of-legs-defined, so a
    partially-sourced `S_S` is visible as such.
-6. `dashboard.json` validates as `dashboard.v2`, retains all v1 fields, and every grade in
+7. `dashboard.json` validates as `dashboard.v2`, retains all v1 fields, and every grade in
    it recomputes from fields present in the same document.
-7. `pytest` green; the 370 existing tests still pass.
-8. On the current fixture run the table renders a row per scored ticker — today 24, all
+8. `pytest` green; the 370 existing tests still pass.
+9. On the current fixture run the table renders a row per scored ticker — today 24, all
    Tier C / WATCHLIST — rather than the three `null` slots of the tactical dashboard.
 
 ## Risks
@@ -313,5 +369,3 @@ number is shown next to how much of it is real. The underlying fix is I15/A4.
    migration, so it needs approval.
 3. **Divergence penalty of 10** — when implied and measured sigma disagree, is a 10-point
    deduction plus a visible flag the right weight, or should divergence cap the grade?
-4. **Sort order.** Grade descending. Should `TRADEABLE` rows always float above
-   `WATCHLIST` regardless of grade?
