@@ -10,10 +10,12 @@ from briefing_app.dashboard.grading import (
     BELOW_SPOT,
     DIRECTIONAL_FULL_CONVICTION,
     NO_SCENARIO_TABLE,
+    NO_S_CTE,
     OUTSIDE_ONE_SIGMA,
     WITHIN_ONE_SIGMA,
     alignment,
     compute_grade,
+    letter_for_score,
     thesis_band,
 )
 from briefing_app.dashboard.models import TradingIdeaRow
@@ -108,35 +110,18 @@ def row(
     ],
 )
 def test_grade_letter_boundaries(score: int, letter: str) -> None:
-    settings = ReportGradingSettings(
-        probability_weight=1.0,
-        alignment_weight=0.0,
-        divergence_penalty=0.0,
-        crowding_penalty_scale=0.0,
-    )
-    setup = make_setup(
-        SetupType.LONG_PREMIUM_STRADDLE,
-        direction=Direction.NEUTRAL,
-        table=make_table(within=1.0 - score / 100, above=score / 100),
-    )
-
-    result = compute_grade(setup, settings=settings)
-
-    assert result.score == pytest.approx(score)
-    assert result.letter == letter
+    assert letter_for_score(score) == letter
 
 
 @pytest.mark.parametrize(
     ("tier", "expected_score", "expected_letter"),
     [
-        # 0.20 * 0.95 + 0.80 * 1.0: s_cte 0.95 is far past the neutral band, so the
-        # directional alignment branch saturates at one band.
-        (ConfidenceTier.A, 99.0, "A+"),
-        (ConfidenceTier.B, 81.0, "B+"),
-        (ConfidenceTier.C, 57.0, "C"),
+        (ConfidenceTier.A, 100.0, "A+"),
+        (ConfidenceTier.B, 100.0, "B+"),
+        (ConfidenceTier.C, 100.0, "C"),
     ],
 )
-def test_grade_respects_tier_ceilings(
+def test_grade_caps_displayed_letter_without_clamping_score(
     tier: ConfidenceTier,
     expected_score: float,
     expected_letter: str,
@@ -151,8 +136,9 @@ def test_grade_respects_tier_ceilings(
 
     assert result.score == pytest.approx(expected_score)
     assert result.letter == expected_letter
-    ceiling = expected_score if tier is not ConfidenceTier.A else 100.0
-    assert result.tier_ceiling == pytest.approx(ceiling)
+    assert result.tier_ceiling == pytest.approx(
+        {ConfidenceTier.A: 100.0, ConfidenceTier.B: 81.0, ConfidenceTier.C: 57.0}[tier]
+    )
 
 
 THESIS_CASES = [
@@ -246,9 +232,9 @@ def test_directional_grade_uses_side_of_spot_not_one_sigma_tail() -> None:
 
     assert result.thesis_band == ABOVE_SPOT
     assert result.thesis_probability == pytest.approx(0.50)
-    assert result.probability_weight == pytest.approx(0.20)
-    assert result.alignment_weight == pytest.approx(0.80)
-    assert result.raw_score == pytest.approx(90.0)
+    assert result.probability_weight == pytest.approx(0.0)
+    assert result.alignment_weight == pytest.approx(1.0)
+    assert result.raw_score == pytest.approx(100.0)
     assert result.letter == "A+"
 
 
@@ -298,15 +284,14 @@ def test_compute_grade_applies_divergence_and_crowding_penalties() -> None:
 
     result = compute_grade(setup, confidence_multiplier=0.5)
 
-    # 0.20 * 0.80 + 0.80 * 1.0: s_cte 0.8 saturates the directional alignment branch.
-    assert result.raw_score == pytest.approx(96.0)
+    assert result.raw_score == pytest.approx(100.0)
     assert result.penalties == ["divergence_penalty", "crowding_penalty"]
     assert result.penalty_total == pytest.approx(20.0)
-    assert result.score == pytest.approx(76.0)
+    assert result.score == pytest.approx(80.0)
     assert result.letter == "B+"
 
 
-def test_tier_c_high_probability_and_alignment_grades_no_better_than_c() -> None:
+def test_tier_c_high_probability_and_alignment_displays_no_better_than_c() -> None:
     setup = make_setup(
         tier=ConfidenceTier.C,
         s_cte=0.9,
@@ -315,17 +300,71 @@ def test_tier_c_high_probability_and_alignment_grades_no_better_than_c() -> None
 
     result = compute_grade(setup)
 
-    assert result.score == pytest.approx(57.0)
+    assert result.score == pytest.approx(100.0)
     assert result.letter == "C"
 
 
-def test_missing_probability_returns_unscored_result_with_reason() -> None:
+def test_tier_b_high_probability_and_alignment_displays_no_better_than_b_plus() -> None:
+    setup = make_setup(
+        tier=ConfidenceTier.B,
+        s_cte=0.9,
+        table=make_table(below=0.05, within=0.0, above=0.95),
+    )
+
+    result = compute_grade(setup)
+
+    assert result.score == pytest.approx(100.0)
+    assert result.letter == "B+"
+
+
+def test_letter_cap_preserves_numeric_resolution_between_high_conviction_rows() -> None:
+    orcl = compute_grade(make_setup(tier=ConfidenceTier.B, s_cte=0.326))
+    amat = compute_grade(make_setup(tier=ConfidenceTier.B, s_cte=0.296))
+    intc = compute_grade(make_setup(tier=ConfidenceTier.B, s_cte=0.293))
+
+    assert orcl.score == pytest.approx(93.14)
+    assert amat.score == pytest.approx(84.57)
+    assert intc.score == pytest.approx(83.71)
+    assert len({orcl.score, amat.score, intc.score}) == 3
+    assert [orcl.letter, amat.letter, intc.letter] == ["B+", "B+", "B+"]
+
+
+def test_letter_cap_orders_by_score_even_when_letters_disagree() -> None:
+    tier_c = compute_grade(make_setup(tier=ConfidenceTier.C, s_cte=0.2765))
+    tier_b = compute_grade(make_setup(tier=ConfidenceTier.B, s_cte=0.259))
+
+    assert tier_c.score == pytest.approx(79.0)
+    assert tier_c.letter == "C"
+    assert tier_b.score == pytest.approx(74.0)
+    assert tier_b.letter == "B+"
+    assert tier_c.score > tier_b.score
+
+
+def test_missing_probability_returns_scored_result_with_display_reason() -> None:
     setup = StubSetup(
         setup_type=SetupType.EVENT_DIRECTIONAL_LONG,
         direction=Direction.LONG,
         tier=ConfidenceTier.A,
-        s_cte=0.9,
+        s_cte=0.175,
         scenario_table=None,
+    )
+
+    result = compute_grade(setup)
+
+    assert result.score == pytest.approx(50.0)
+    assert result.letter == "C"
+    assert result.thesis_band == ABOVE_SPOT
+    assert result.thesis_probability is None
+    assert result.penalties == []
+    assert result.reasons == [NO_SCENARIO_TABLE]
+
+
+def test_missing_s_cte_returns_unscored_result_with_reason() -> None:
+    setup = make_setup(
+        SetupType.EVENT_DIRECTIONAL_LONG,
+        direction=Direction.LONG,
+        s_cte=None,
+        table=make_table(below=0.05, within=0.0, above=0.95),
     )
 
     result = compute_grade(setup)
@@ -333,15 +372,50 @@ def test_missing_probability_returns_unscored_result_with_reason() -> None:
     assert result.score is None
     assert result.letter is None
     assert result.thesis_band == ABOVE_SPOT
-    assert result.thesis_probability is None
-    assert result.penalties == []
-    assert result.reasons == [NO_SCENARIO_TABLE]
+    assert result.thesis_probability == pytest.approx(0.95)
+    assert result.reasons == [NO_S_CTE]
+
+
+def test_directional_probability_adds_no_score_when_alignment_is_zero() -> None:
+    setup = make_setup(
+        SetupType.EVENT_DIRECTIONAL_LONG,
+        direction=Direction.LONG,
+        s_cte=0.0,
+        table=make_table(below=0.05, within=0.0, above=0.95),
+    )
+
+    result = compute_grade(setup)
+
+    assert result.thesis_probability == pytest.approx(0.95)
+    assert result.probability_weight == pytest.approx(0.0)
+    assert result.alignment_weight == pytest.approx(1.0)
+    assert result.score == pytest.approx(0.0)
+    assert result.letter == "F"
+
+
+def test_neutral_jpm_regression_scores_zero_when_s_cte_is_past_the_band() -> None:
+    """JPM had P=0.683 but S_CTE=0.208 contradicted its neutral thesis."""
+
+    setup = make_setup(
+        SetupType.WATCHLIST_NO_TRADE,
+        direction=Direction.NEUTRAL,
+        s_cte=0.208,
+        table=make_table(below=0.1585, within=0.683, above=0.1585),
+    )
+
+    result = compute_grade(setup)
+
+    assert result.thesis_band == WITHIN_ONE_SIGMA
+    assert result.thesis_probability == pytest.approx(0.683)
+    assert result.alignment == pytest.approx(0.0)
+    assert result.score == pytest.approx(0.0)
+    assert result.letter == "F"
 
 
 # --- G1: published grades must reconcile from published fields ------------------
 #
-# `TradingIdeaRow` publishes thesis_band, direction, thesis_probability, s_cte, tier
-# and grade_penalties; `per_ticker_sections[].gate.confidence_multiplier` publishes the
+# `TradingIdeaRow` publishes thesis_band, direction, s_cte, tier and grade_penalties;
+# `per_ticker_sections[].gate.confidence_multiplier` publishes the
 # crowding input. Everything needed to re-derive `grade_score` is therefore on the
 # artifact, and a reader who cannot reproduce a published grade has found a defect --
 # either in the formula or in the fields the builder publishes alongside it.
@@ -349,14 +423,27 @@ def test_missing_probability_returns_unscored_result_with_reason() -> None:
 # This reconciler is deliberately an independent re-implementation of the documented
 # formula rather than a call into `grading`, so it fails when the two drift apart.
 
-PUBLISHED_TIER_CEILINGS = {"A": 100.0, "B": 81.0, "C": 57.0}
+PUBLISHED_LETTER_BANDS: tuple[tuple[float, str], ...] = (
+    (90.0, "A+"),
+    (82.0, "A"),
+    (74.0, "B+"),
+    (66.0, "B"),
+    (58.0, "C+"),
+    (50.0, "C"),
+    (35.0, "D"),
+    (0.0, "F"),
+)
+PUBLISHED_TIER_LETTER_CAPS = {"A": "A+", "B": "B+", "C": "C"}
+PUBLISHED_LETTER_RANK = {
+    letter: rank for rank, (_, letter) in enumerate(PUBLISHED_LETTER_BANDS)
+}
 
 
 def reconcile_published_grade(
     *,
     thesis_band: str,
     direction: str,
-    thesis_probability: float,
+    thesis_probability: float | None,
     s_cte: float,
     tier: str,
     grade_penalties: list[str],
@@ -366,14 +453,7 @@ def reconcile_published_grade(
     """Re-derive a published grade_score from published row fields alone."""
 
     settings = settings or ReportGradingSettings()
-
-    if thesis_band in (ABOVE_SPOT, BELOW_SPOT):
-        # Directional theses are weighted differently from neutral ones: the
-        # probability of merely finishing on one side of spot is near 0.50 by
-        # construction, so it carries the smaller weight.
-        probability_weight = settings.directional_probability_weight
-    else:
-        probability_weight = settings.probability_weight
+    _ = (thesis_band, thesis_probability, tier)
 
     # The alignment branch keys off direction, not band: `beyond +/-1 sigma` covers
     # both a NEUTRAL straddle and a directional skew structure.
@@ -385,10 +465,7 @@ def reconcile_published_grade(
     else:
         support = min(max(1.0 - (abs(s_cte) / NEUTRAL_BAND), 0.0), 1.0)
 
-    raw_score = 100.0 * (
-        probability_weight * thesis_probability
-        + (1.0 - probability_weight) * support
-    )
+    raw_score = 100.0 * support
 
     penalty_total = 0.0
     if "divergence_penalty" in grade_penalties:
@@ -396,8 +473,23 @@ def reconcile_published_grade(
     if "crowding_penalty" in grade_penalties:
         penalty_total += settings.crowding_penalty_scale * (1.0 - confidence_multiplier)
 
-    ceiling = PUBLISHED_TIER_CEILINGS[tier]
-    return round(min(max(raw_score - penalty_total, 0.0), ceiling), 2)
+    return round(max(raw_score - penalty_total, 0.0), 2)
+
+
+def reconcile_published_letter(score: float, tier: str) -> str:
+    """Re-derive a published grade_letter from grade_score and tier."""
+
+    for boundary, letter in PUBLISHED_LETTER_BANDS:
+        if score >= boundary:
+            base_letter = letter
+            break
+    else:
+        base_letter = "F"
+
+    cap = PUBLISHED_TIER_LETTER_CAPS[tier]
+    if PUBLISHED_LETTER_RANK[base_letter] < PUBLISHED_LETTER_RANK[cap]:
+        return cap
+    return base_letter
 
 
 RECONCILIATION_CASES = [
@@ -477,6 +569,7 @@ def test_published_grade_reconciles_from_published_fields(
 
     assert result.score is not None
     assert result.thesis_probability is not None
+    assert result.letter is not None
     reconciled = reconcile_published_grade(
         thesis_band=result.thesis_band,
         # build.py publishes `setup.direction`, the same value compute_grade branched on.
@@ -492,6 +585,7 @@ def test_published_grade_reconciles_from_published_fields(
         f"{setup_type.value} {direction.value} s_cte={s_cte} did not reconcile: "
         f"published {result.score}, recomputed {reconciled}"
     )
+    assert reconcile_published_letter(reconciled, tier.value) == result.letter
 
 
 def test_every_reconciliation_case_reconciles_with_zero_unexplained_rows() -> None:
@@ -520,6 +614,7 @@ def test_every_reconciliation_case_reconciles_with_zero_unexplained_rows() -> No
         )
         result = compute_grade(setup, confidence_multiplier=confidence_multiplier)
         assert result.score is not None and result.thesis_probability is not None
+        assert result.letter is not None
         reconciled = reconcile_published_grade(
             thesis_band=result.thesis_band,
             direction=direction.value,
@@ -534,28 +629,36 @@ def test_every_reconciliation_case_reconciles_with_zero_unexplained_rows() -> No
                 f"{setup_type.value}/{direction.value} s_cte={s_cte}: "
                 f"published {result.score} vs recomputed {reconciled}"
             )
+        if reconcile_published_letter(reconciled, tier.value) != result.letter:
+            unexplained.append(
+                f"{setup_type.value}/{direction.value} s_cte={s_cte}: "
+                f"published {result.letter} vs recomputed "
+                f"{reconcile_published_letter(reconciled, tier.value)}"
+            )
 
     assert unexplained == []
 
 
-def test_directional_thesis_uses_its_own_probability_weight() -> None:
-    """The 0.60/0.40 split is neutral-only; directional theses use 0.20/0.80.
+def test_align_reports_probability_as_display_only_weight() -> None:
+    """Configured probability weights remain loadable but no longer affect grades."""
 
-    Reconciling a directional row against 0.60/0.40 over-predicts it, which is what
-    `_effective_weights` in dashboard/grading.py exists to do. Pin the split so a
-    silent change to it cannot pass as a rounding difference.
-    """
-
-    settings = ReportGradingSettings()
-    directional = compute_grade(
+    low_probability = compute_grade(
         make_setup(
             SetupType.EVENT_DIRECTIONAL_LONG,
             direction=Direction.LONG,
-            s_cte=0.010,
-            table=make_table(below=0.30, within=0.20, above=0.50),
+            s_cte=0.10,
+            table=make_table(below=0.95, within=0.0, above=0.05),
         )
     )
-    neutral = compute_grade(
+    high_probability = compute_grade(
+        make_setup(
+            SetupType.EVENT_DIRECTIONAL_LONG,
+            direction=Direction.LONG,
+            s_cte=0.10,
+            table=make_table(below=0.05, within=0.0, above=0.95),
+        )
+    )
+    neutral_probability = compute_grade(
         make_setup(
             SetupType.SHORT_PREMIUM_IRON_CONDOR,
             direction=Direction.NEUTRAL,
@@ -564,21 +667,19 @@ def test_directional_thesis_uses_its_own_probability_weight() -> None:
         )
     )
 
-    assert directional.probability_weight == pytest.approx(
-        settings.directional_probability_weight
-    )
-    assert directional.alignment_weight == pytest.approx(
-        1.0 - settings.directional_probability_weight
-    )
-    assert neutral.probability_weight == pytest.approx(settings.probability_weight)
-    assert neutral.alignment_weight == pytest.approx(settings.alignment_weight)
+    assert low_probability.thesis_probability == pytest.approx(0.05)
+    assert high_probability.thesis_probability == pytest.approx(0.95)
+    assert low_probability.score == pytest.approx(high_probability.score)
+    for result in (low_probability, high_probability, neutral_probability):
+        assert result.probability_weight == pytest.approx(0.0)
+        assert result.alignment_weight == pytest.approx(1.0)
 
 
 def test_grade_penalties_accounts_for_the_whole_penalty_total() -> None:
     """Every point deducted must be named in `grade_penalties`.
 
-    `grade_penalties` is the only penalty evidence on a published row, so an applied
-    penalty missing from the list makes the row irreconcilable for a reader.
+    The row publishes both penalty names and the aggregate deduction, so an applied
+    penalty missing from the list remains visible to the audit path.
     """
 
     settings = ReportGradingSettings()
@@ -691,8 +792,8 @@ def test_aligned_directional_row_never_grades_below_a_neutral_row_at_the_band_ed
     probability grid and both tiers, the directional row must grade at least as well.
 
     This is the regression that motivated G2: while the directional branch scored raw
-    |S_CTE| it could not clear about a third of its alignment weight, so every neutral
-    row outranked every directional row with an empty corridor between the two blocks.
+    |S_CTE| it could not reach the same support range as neutral alignment, so every
+    neutral row outranked every directional row with an empty corridor between blocks.
 
     G2b moved the directional row of this comparison from ``NEUTRAL_BAND`` to
     ``DIRECTIONAL_FULL_CONVICTION``. The band edge is the point of *minimum*
@@ -700,7 +801,7 @@ def test_aligned_directional_row_never_grades_below_a_neutral_row_at_the_band_ed
     longer maximal, and it may now legitimately grade below a high-probability neutral
     row -- that interleaving is the point of G2b, not a regression of G2. The invariant
     G2 actually protects is the one pinned here: at full conviction the directional
-    branch takes its whole alignment weight.
+    branch reaches full support.
     """
 
     probabilities = [round(0.05 * step, 2) for step in range(1, 20)]
@@ -792,8 +893,8 @@ def test_directional_alignment_does_not_saturate_at_the_neutral_band_edge() -> N
     """`NEUTRAL_BAND` is minimum directional conviction, not maximum.
 
     Dividing the directional branch by `NEUTRAL_BAND` made every row past 0.15 score
-    identically, so with the 0.80 directional alignment weight a merely-non-neutral
-    idea was indistinguishable from a strongly supported one. Four of the twelve
+    identically, so a merely-non-neutral idea was indistinguishable from a strongly
+    supported one. Four of the twelve
     directional rows on the 2026-09-04 live run sit past 0.15 (ORCL 0.317, GM 0.249,
     INTC 0.213, AAPL 0.163), so this was live, not hypothetical.
     """
@@ -848,8 +949,7 @@ def test_directional_grades_differ_between_band_edge_and_double_the_band() -> No
 
     assert edge.score is not None and strong.score is not None
     assert edge.score < strong.score
-    # 0.80 alignment weight over (0.30 - 0.15) of a conviction unit.
-    expected_gap = 100 * 0.80 * (
+    expected_gap = 100 * (
         min(1.0, 0.30 / DIRECTIONAL_FULL_CONVICTION)
         - min(1.0, 0.15 / DIRECTIONAL_FULL_CONVICTION)
     )

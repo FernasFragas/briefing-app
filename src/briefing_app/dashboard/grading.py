@@ -1,8 +1,9 @@
 """Pure grade computation for dashboard trading ideas.
 
-Grades only combine values already computed upstream: thesis-band probability,
-S_CTE, confidence tier, and gate confidence. This module performs no I/O and does
-not build, render, or mutate dashboard payloads.
+Grades combine only values already computed upstream. S_CTE alignment determines the
+score, confidence tier caps the displayed letter, and gate confidence can deduct a
+penalty. Thesis-band probability is selected and returned as display context only.
+This module performs no I/O and does not build, render, or mutate dashboard payloads.
 """
 
 from __future__ import annotations
@@ -33,9 +34,8 @@ NO_S_CTE = "NO_S_CTE"
 #: NEUTRAL_BAND is the threshold at which a signal *stops being neutral*: it marks the
 #: point of *minimum* directional conviction, not maximum. Using it as the denominator
 #: of the directional branch was a category error -- it saturated alignment at
-#: |S_CTE| >= 0.15, so with the 0.80 directional alignment weight every row past the
-#: band edge scored >= 80 raw whatever its probability, and strong directional ideas
-#: became indistinguishable from merely non-neutral ones.
+#: |S_CTE| >= 0.15, so every row past the band edge reached full conviction and strong
+#: directional ideas became indistinguishable from merely non-neutral ones.
 #:
 #: 0.35 is chosen from observed live data: |S_CTE| tops out at 0.317 on real runs, so
 #: 0.35 is the *smallest* denominator that leaves no live row saturating. Smaller was
@@ -43,25 +43,6 @@ NO_S_CTE = "NO_S_CTE"
 #: 1.0. Larger was tested and rejected too: the denominator only moves the top of the
 #: directional range, and every value depresses the tail, so the smallest non-saturating
 #: choice is the one that costs the weak rows least.
-#:
-#: This constant cannot fix the real asymmetry, and is not expected to. Directional raw
-#: is `10 + 80 * alignment` because P(above spot) is pinned near 0.50 by construction and
-#: carries only 0.20 weight, while a neutral row draws 30-52 points from a P that varies
-#: 0.50-0.86. That 20-42 point head start is structural.
-#:
-#: An earlier version of this note proposed fixing it with "probability of reaching the
-#: setup's target". **That is disproved -- do not attempt it**
-#: (`docs/alternatives/directional-probability.md`, 2026-09-06). No target exists anywhere
-#: in `strategy/`, and every buildable alternative was measured and rejected: a
-#: distribution centred on spot cannot express direction, so no probability the scenario
-#: table can produce carries directional information. Directional P was measured at spread
-#: 0.049 across two runs, and *exactly* 0.5000 on every `measured_sigma` row.
-#:
-#: Two decisions came out of that search and are filed rather than applied, both in
-#: `HANDOFF.md`: setting `directional_probability_weight` to 0.0 so alignment carries the
-#: branch alone, and the larger finding that the real defect is on the *neutral* side --
-#: a neutral row is paid `0.60 * 0.683 = 41` points for the definition of the band it is
-#: measured over, which is a tautology, not evidence.
 DIRECTIONAL_FULL_CONVICTION: float = 0.35
 
 _BELOW_ROWS = ("below 2 sigma", "1 to 2 sigma down")
@@ -77,6 +58,12 @@ _TIER_CEILINGS: dict[ConfidenceTier, float] = {
     ConfidenceTier.C: 57.0,
 }
 
+_TIER_LETTER_CAPS: dict[ConfidenceTier, str] = {
+    ConfidenceTier.A: "A+",
+    ConfidenceTier.B: "B+",
+    ConfidenceTier.C: "C",
+}
+
 _LETTER_BANDS: tuple[tuple[float, str], ...] = (
     (90.0, "A+"),
     (82.0, "A"),
@@ -87,6 +74,10 @@ _LETTER_BANDS: tuple[tuple[float, str], ...] = (
     (35.0, "D"),
     (0.0, "F"),
 )
+
+_LETTER_RANK: dict[str, int] = {
+    letter: rank for rank, (_, letter) in enumerate(_LETTER_BANDS)
+}
 
 
 class SetupLike(Protocol):
@@ -166,13 +157,22 @@ def _conviction_units(s_cte: float) -> float:
     return min(1.0, abs(s_cte) / DIRECTIONAL_FULL_CONVICTION)
 
 
-def letter_for_score(score: float) -> str:
-    """Map a clamped numeric score to the dashboard letter band."""
+def letter_for_score(score: float, tier: ConfidenceTier | str | None = None) -> str:
+    """Map a numeric score to the dashboard letter band, capped by tier if given."""
 
     for boundary, letter in _LETTER_BANDS:
         if score >= boundary:
-            return letter
-    return "F"
+            base_letter = letter
+            break
+    else:
+        base_letter = "F"
+
+    if tier is None:
+        return base_letter
+    cap = _TIER_LETTER_CAPS[_coerce_tier(tier)]
+    if _LETTER_RANK[base_letter] < _LETTER_RANK[cap]:
+        return cap
+    return base_letter
 
 
 def compute_grade(
@@ -183,29 +183,12 @@ def compute_grade(
 ) -> GradeResult:
     """Compute a dashboard grade for a scored setup.
 
-    A missing thesis probability produces an unscored result. The grade is never
-    inferred from S_CTE alone because the report names `P(thesis band)` as an input.
+    ALIGN scoring uses S_CTE alignment alone. Thesis probability is still selected and
+    returned for display, but a missing probability no longer prevents grading.
     """
 
     grading_settings = settings or ReportGradingSettings()
     thesis = _select_thesis_band(setup)
-    if thesis.probability is None:
-        reason = NO_SCENARIO_TABLE if not thesis.has_scenario_table else NO_THESIS_PROBABILITY
-        return GradeResult(
-            score=None,
-            letter=None,
-            penalties=[],
-            thesis_band=thesis.label,
-            thesis_probability=None,
-            alignment=None,
-            raw_score=None,
-            penalty_total=0.0,
-            tier_ceiling=None,
-            probability_weight=None,
-            alignment_weight=None,
-            reasons=[reason],
-        )
-
     s_cte = setup.s_cte
     if s_cte is None:
         return GradeResult(
@@ -226,12 +209,14 @@ def compute_grade(
     _validate_unit_interval("confidence_multiplier", confidence_multiplier)
     tier = _coerce_tier(setup.tier)
     alignment_score = alignment(s_cte, setup.direction)
-    probability_weight, alignment_weight = _effective_weights(grading_settings, thesis)
-    raw_score = 100.0 * (
-        probability_weight * thesis.probability
-        + alignment_weight * alignment_score
-    )
+    probability_weight = 0.0
+    alignment_weight = 1.0
+    raw_score = 100.0 * alignment_score
 
+    reasons: list[str] = []
+    if thesis.probability is None:
+        reason = NO_SCENARIO_TABLE if not thesis.has_scenario_table else NO_THESIS_PROBABILITY
+        reasons.append(reason)
     penalties: list[str] = []
     penalty_total = 0.0
     if setup.scenario_table is not None and _thesis_diverges(
@@ -248,10 +233,10 @@ def compute_grade(
         penalty_total += crowding_penalty
 
     tier_ceiling = _TIER_CEILINGS[tier]
-    score = round(min(max(raw_score - penalty_total, 0.0), tier_ceiling), 2)
+    score = round(max(raw_score - penalty_total, 0.0), 2)
     return GradeResult(
         score=score,
-        letter=letter_for_score(score),
+        letter=letter_for_score(score, tier),
         penalties=penalties,
         thesis_band=thesis.label,
         thesis_probability=thesis.probability,
@@ -261,18 +246,8 @@ def compute_grade(
         tier_ceiling=tier_ceiling,
         probability_weight=probability_weight,
         alignment_weight=alignment_weight,
-        reasons=[],
+        reasons=reasons,
     )
-
-
-def _effective_weights(
-    settings: ReportGradingSettings,
-    thesis: _ThesisSelection,
-) -> tuple[float, float]:
-    if thesis.label in (ABOVE_SPOT, BELOW_SPOT):
-        probability_weight = settings.directional_probability_weight
-        return probability_weight, 1.0 - probability_weight
-    return settings.probability_weight, settings.alignment_weight
 
 
 def _select_thesis_band(setup: SetupLike) -> _ThesisSelection:
