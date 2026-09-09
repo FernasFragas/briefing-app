@@ -6,6 +6,7 @@ import unittest
 from sqlalchemy import create_engine, select
 
 from briefing_app.storage import (
+    DailySnapshotPersistenceRefused,
     StorageRepository,
     briefing_run,
     call_log,
@@ -237,6 +238,51 @@ class StorageRepositoryTest(unittest.TestCase):
         row = signals[0]._mapping
         self.assertEqual(row["grade_letter"], "B")
         self.assertEqual(float(row["grade_score"]), 0.81)
+
+    def test_daily_snapshot_refuses_explicit_fixture_run(self) -> None:
+        run_id = self.repo.upsert_briefing_run(
+            run_date=date(2026, 8, 27),
+            status="running",
+            details={"data_mode": "fixture"},
+        )
+
+        with self.assertRaises(DailySnapshotPersistenceRefused) as raised:
+            self.repo.upsert_daily_snapshot(
+                {
+                    "run_id": run_id,
+                    "ticker": "AAPL",
+                    "snap_date": date(2026, 8, 27),
+                    "iv_atm": 0.42,
+                    "pc_ratio_vol": 0.70,
+                    "pc_ratio_oi": 0.90,
+                }
+            )
+
+        self.assertIn("data_mode='fixture'", str(raised.exception))
+        with self.engine.connect() as conn:
+            self.assertEqual(conn.execute(select(daily_snapshot)).all(), [])
+
+    def test_daily_snapshot_accepts_explicit_live_run(self) -> None:
+        run_id = self.repo.upsert_briefing_run(
+            run_date=date(2026, 8, 27),
+            status="running",
+            details={"data_mode": "live"},
+        )
+
+        self.repo.upsert_daily_snapshot(
+            {
+                "run_id": run_id,
+                "ticker": "AAPL",
+                "snap_date": date(2026, 8, 27),
+                "iv_atm": 0.42,
+                "pc_ratio_vol": 0.70,
+                "pc_ratio_oi": 0.90,
+            }
+        )
+
+        row = self.repo.daily_snapshot_for("AAPL", date(2026, 8, 27))
+        self.assertIsNotNone(row)
+        self.assertTrue(self.repo.option_metrics_are_stored("AAPL", date(2026, 8, 27)))
 
     def test_setup_signal_allows_null_grade_fields_and_remains_idempotent(self) -> None:
         run_date = date(2026, 8, 28)

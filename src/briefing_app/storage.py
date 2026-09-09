@@ -39,6 +39,7 @@ from sqlalchemy.engine import Connection, Engine
 
 metadata = MetaData()
 LOCAL_SQLITE_FILENAME = "briefing.sqlite3"
+LIVE_DATA_MODE = "live"
 
 
 def _id_type() -> BigInteger:
@@ -340,7 +341,29 @@ class StorageRepository:
         values.setdefault("component_scores", {})
         values.setdefault("raw", {})
         with self.engine.begin() as conn:
+            self._refuse_non_live_daily_snapshot(conn, values)
             self._upsert_one(conn, daily_snapshot, values, conflict_columns=("ticker", "snap_date"))
+
+    def daily_snapshot_for(self, ticker: str, snap_date: date) -> dict[str, Any] | None:
+        with self.engine.connect() as conn:
+            stmt = select(daily_snapshot).where(
+                and_(
+                    daily_snapshot.c.ticker == ticker.strip().upper(),
+                    daily_snapshot.c.snap_date == snap_date,
+                )
+            )
+            row = conn.execute(stmt).first()
+            return _row_to_dict(row) if row is not None else None
+
+    def option_metrics_are_stored(self, ticker: str, snap_date: date) -> bool:
+        row = self.daily_snapshot_for(ticker, snap_date)
+        if row is None:
+            return False
+        return (
+            row.get("iv_atm") is not None
+            and row.get("pc_ratio_vol") is not None
+            and row.get("pc_ratio_oi") is not None
+        )
 
     def upsert_evidence_rows(self, rows: Iterable[Mapping[str, Any]]) -> int:
         count = 0
@@ -732,6 +755,26 @@ class StorageRepository:
         return through_date - timedelta(days=days - 1)
 
     @staticmethod
+    def _refuse_non_live_daily_snapshot(conn: Connection, values: Mapping[str, Any]) -> None:
+        run_id = values.get("run_id")
+        if run_id is None:
+            return
+
+        run_details = conn.execute(
+            select(briefing_run.c.details).where(briefing_run.c.id == run_id)
+        ).scalar_one_or_none()
+        data_mode = _data_mode_from_details(run_details)
+        if data_mode is None or data_mode == LIVE_DATA_MODE:
+            return
+
+        raise DailySnapshotPersistenceRefused(
+            ticker=str(values.get("ticker") or ""),
+            snap_date=values.get("snap_date"),
+            run_id=run_id,
+            data_mode=data_mode,
+        )
+
+    @staticmethod
     def _insert_for_connection(conn: Connection, table: Table):
         if conn.dialect.name == "postgresql":
             return postgresql_insert(table)
@@ -807,6 +850,21 @@ def _empty_baseline(ticker: str, days: int) -> dict[str, Any]:
     }
 
 
+class DailySnapshotPersistenceRefused(RuntimeError):
+    """Raised when synthetic/non-live data tries to enter `daily_snapshot`."""
+
+    def __init__(self, *, ticker: str, snap_date: Any, run_id: Any, data_mode: str) -> None:
+        self.ticker = ticker
+        self.snap_date = snap_date
+        self.run_id = run_id
+        self.data_mode = data_mode
+        super().__init__(
+            "daily_snapshot persistence refused: "
+            f"run_id {run_id} for {ticker} on {snap_date} has data_mode={data_mode!r}; "
+            "only live runs may write volatility-history snapshots."
+        )
+
+
 def _numeric_stats(values: Iterable[Any]) -> dict[str, Any]:
     nums = [_as_float(value) for value in values if value is not None]
     return {
@@ -826,6 +884,15 @@ def _empty_numeric_stats() -> dict[str, Any]:
         "min": None,
         "max": None,
     }
+
+
+def _data_mode_from_details(details: Any) -> str | None:
+    if not isinstance(details, Mapping):
+        return None
+    raw = details.get("data_mode")
+    if raw is None:
+        return None
+    return str(raw).strip().lower()
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
