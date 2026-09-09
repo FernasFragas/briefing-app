@@ -24,7 +24,7 @@ from briefing_app.models.candidate import (
     ExpressionClass,
     Instrument,
 )
-from briefing_app.models.gate import CandidateGateResult
+from briefing_app.models.gate import CandidateGateResult, GateFlagCode
 from briefing_app.models.scoring import ConfidenceTier, Posture, ScoringResult
 from briefing_app.options_math import (
     OptionQuote,
@@ -50,6 +50,19 @@ from briefing_app.strategy.models import (
 from briefing_app.strategy.scenarios import ScenarioTable, build_scenario_table
 
 TRADING_DAYS_PER_YEAR: int = 252
+
+SETUP_REQUIRES_CONFIRMED_CATALYST: dict[SetupType, bool] = {
+    SetupType.SHORT_PREMIUM_IRON_CONDOR: True,
+    SetupType.LONG_PREMIUM_STRADDLE: True,
+    SetupType.LONG_PREMIUM_CALENDAR: True,
+    SetupType.SKEW_STRUCTURE: False,
+    SetupType.EVENT_DIRECTIONAL_LONG: True,
+    SetupType.EVENT_DIRECTIONAL_PUT: True,
+    SetupType.EVENT_DIRECTIONAL_VERTICAL: True,
+    SetupType.POSITIONAL_LONG: False,
+    SetupType.BORROW_DEPENDENT_SHORT: False,
+    SetupType.WATCHLIST_NO_TRADE: False,
+}
 
 
 def make_run_id(run_date: date_type) -> str:
@@ -198,6 +211,45 @@ class _Evaluation:
         return SetupRejection(
             ticker=self.ticker, setup_type=setup_type, code=code, detail=detail
         )
+
+
+def _has_inferred_primary_catalyst(evaluation: _Evaluation) -> bool:
+    catalyst = evaluation.catalyst
+    if catalyst is None:
+        return False
+    return (
+        not catalyst.is_confirmed
+        or GateFlagCode.ESTIMATED_CATALYST_ONLY in evaluation.context.gate_result.flag_codes
+    )
+
+
+def _inferred_catalyst_warning(evaluation: _Evaluation) -> str | None:
+    catalyst = evaluation.catalyst
+    if catalyst is None or not _has_inferred_primary_catalyst(evaluation):
+        return None
+    source = catalyst.source or "no declared source"
+    return (
+        f"inferred catalyst date: {catalyst.label()} from {source}; do not present "
+        "as confirmed"
+    )
+
+
+def _reject_inferred_catalyst_dependency(
+    evaluation: _Evaluation, setup_type: SetupType
+) -> SetupRejection | None:
+    if not SETUP_REQUIRES_CONFIRMED_CATALYST[setup_type]:
+        return None
+    catalyst = evaluation.catalyst
+    if catalyst is None or not _has_inferred_primary_catalyst(evaluation):
+        return None
+    source = catalyst.source or "no declared source"
+    return evaluation.reject(
+        setup_type,
+        RejectionCode.CATALYST_NOT_CONFIRMED,
+        f"{catalyst.label()} from {source} is cadence-inferred; {setup_type.value} "
+        "depends on the event landing before expiry and needs an IR or "
+        "exchange-sourced date",
+    )
 
 
 def evaluate_candidate_setups(
@@ -677,13 +729,9 @@ def _event_directional_rule(evaluation: _Evaluation) -> Setup | SetupRejection:
     else:
         setup_type = SetupType.EVENT_DIRECTIONAL_VERTICAL
 
-    if settings.require_confirmed_catalyst_for_event and not catalyst.is_confirmed:
-        return evaluation.reject(
-            setup_type,
-            RejectionCode.CATALYST_NOT_CONFIRMED,
-            f"{catalyst.label()} is cadence-inferred; an event trade needs an IR or "
-            "exchange-sourced date",
-        )
+    inferred_rejection = _reject_inferred_catalyst_dependency(evaluation, setup_type)
+    if inferred_rejection is not None:
+        return inferred_rejection
 
     direction = Direction.LONG if bullish else Direction.SHORT
     if direction is Direction.SHORT:
@@ -849,6 +897,10 @@ def _build_setup(
 ) -> Setup | SetupRejection:
     """Apply the Phase 7 floor to a rule that fired, or turn it into a refusal."""
 
+    inferred_rejection = _reject_inferred_catalyst_dependency(evaluation, setup_type)
+    if inferred_rejection is not None:
+        return inferred_rejection
+
     instrument, alternatives = _select_instrument(evaluation, setup_type)
     if instrument is None:
         permitted = ", ".join(i.value for i in evaluation.context.gate_result.permitted_instruments)
@@ -899,6 +951,9 @@ def _build_setup(
             f"crowded consensus trade: confidence x"
             f"{evaluation.context.gate_result.confidence_multiplier:g}"
         )
+    inferred_warning = _inferred_catalyst_warning(evaluation)
+    if inferred_warning is not None:
+        all_warnings.append(inferred_warning)
 
     evidence = _base_evidence(evaluation, invalidation)
     evidence.extend(item for item in extra_evidence if item is not None)
@@ -1143,6 +1198,10 @@ def _watchlist_setup(
     """The no-trade verdict, carrying every reason the name did not produce a setup."""
     measured_range = evaluation.measured_range
     reasons = "; ".join(rejection.label() for rejection in rejections)
+    warnings = list(evaluation.tier_floors)
+    inferred_warning = _inferred_catalyst_warning(evaluation)
+    if inferred_warning is not None:
+        warnings.append(inferred_warning)
     return Setup(
         ticker=evaluation.ticker,
         setup_type=SetupType.WATCHLIST_NO_TRADE,
@@ -1159,7 +1218,7 @@ def _watchlist_setup(
         range_low=measured_range.one_sigma.low if measured_range else None,
         range_high=measured_range.one_sigma.high if measured_range else None,
         rationale=reasons or "no rule fired",
-        warnings=list(evaluation.tier_floors),
+        warnings=warnings,
         size_fraction=0.0,
     )
 

@@ -206,6 +206,64 @@ def test_event_vertical_respects_instrument_fit() -> None:
     assert RejectionCode.NO_INSTRUMENT_FIT in result.rejection_codes
 
 
+def test_event_vertical_rejects_inferred_catalyst_date() -> None:
+    result = evaluate_candidate_setups(
+        context(
+            "E",
+            0.30,
+            structure(event_multiplier=1.5),
+            catalyst_status="estimated",
+            catalyst_source="Historical cadence",
+        ),
+        run_date=RUN_DATE,
+    )
+
+    assert not result.tradeable_setups
+    rejection = result.rejections[0]
+    assert rejection.setup_type is SetupType.EVENT_DIRECTIONAL_VERTICAL
+    assert rejection.code is RejectionCode.CATALYST_NOT_CONFIRMED
+    assert "2026-09-01" in rejection.detail
+    assert "Historical cadence" in rejection.detail
+    assert "depends on the event landing before expiry" in rejection.detail
+
+
+def test_watchlist_no_trade_survives_inferred_catalyst_date_and_is_marked() -> None:
+    result = evaluate_candidate_setups(
+        context(
+            "E",
+            0.0,
+            structure(event_multiplier=1.5),
+            catalyst_status="estimated",
+            catalyst_source="Historical cadence",
+        ),
+        run_date=RUN_DATE,
+    )
+
+    setup = result.setups[0]
+    assert setup.setup_type is SetupType.WATCHLIST_NO_TRADE
+    assert setup.decision is SetupDecision.WATCHLIST
+    assert RejectionCode.CATALYST_NOT_CONFIRMED not in result.rejection_codes
+    assert any("inferred catalyst date" in warning for warning in setup.warnings)
+
+
+def test_positional_long_survives_inferred_catalyst_date_and_is_marked() -> None:
+    result = evaluate_candidate_setups(
+        context(
+            "P",
+            0.30,
+            structure(event_multiplier=1.0),
+            catalyst_status="estimated",
+            catalyst_source="Historical cadence",
+        ),
+        run_date=RUN_DATE,
+    )
+
+    setup = only_tradeable(result)
+    assert setup.setup_type is SetupType.POSITIONAL_LONG
+    assert RejectionCode.CATALYST_NOT_CONFIRMED not in result.rejection_codes
+    assert any("inferred catalyst date" in warning for warning in setup.warnings)
+
+
 def test_borrow_dependent_short_requires_verified_borrow_evidence() -> None:
     result = evaluate_candidate_setups(
         context(
@@ -262,7 +320,7 @@ def test_leveraged_event_setup_carries_drag_check() -> None:
     assert any(item.field_name == "leverage_drag_pct" for item in setup.evidence)
 
 
-def test_leveraged_event_setup_rejects_estimated_catalyst_even_if_gate_allows_it() -> None:
+def test_event_setup_rejects_estimated_catalyst_even_if_gate_allows_leverage() -> None:
     result = evaluate_candidate_setups(
         context(
             "E",
@@ -270,6 +328,7 @@ def test_leveraged_event_setup_rejects_estimated_catalyst_even_if_gate_allows_it
             structure(event_multiplier=1.5),
             permitted_instruments=["knock_out"],
             catalyst_status="estimated",
+            catalyst_source="Historical cadence",
             gate_settings=GateSettings(allow_leverage_on_estimated_catalyst=True),
         ),
         run_date=RUN_DATE,
@@ -277,7 +336,7 @@ def test_leveraged_event_setup_rejects_estimated_catalyst_even_if_gate_allows_it
     )
 
     assert not result.tradeable_setups
-    assert RejectionCode.LEVERAGE_REFUSED in result.rejection_codes
+    assert RejectionCode.CATALYST_NOT_CONFIRMED in result.rejection_codes
 
 
 def test_tactical_dashboard_excludes_tier_c_watchlist_setups() -> None:
@@ -324,6 +383,7 @@ def context(
     permitted_instruments: list[str] | None = None,
     borrow_source: str | None = None,
     catalyst_status: str = "confirmed",
+    catalyst_source: str = "Company IR",
     gate_settings: GateSettings | None = None,
 ) -> SetupContext:
     candidate = make_candidate(
@@ -332,7 +392,7 @@ def context(
         expression_class=expression_class,
         permitted_instruments=permitted_instruments or ["shares", "options"],
         borrow_source=borrow_source,
-        catalysts=[make_catalyst(status=catalyst_status)],
+        catalysts=[make_catalyst(status=catalyst_status, source=catalyst_source)],
     )
     gate_result = run_gate(
         [candidate],
@@ -528,13 +588,15 @@ def catalyst() -> Catalyst:
     )
 
 
-def make_catalyst(*, status: str = "confirmed") -> dict[str, object]:
+def make_catalyst(
+    *, status: str = "confirmed", source: str = "Company IR"
+) -> dict[str, object]:
     return {
         "name": "Quarterly results",
         "date": RUN_DATE + timedelta(days=3),
         "status": status,
         "kind": "earnings",
-        "source": "Company IR",
+        "source": source,
     }
 
 
