@@ -6,8 +6,11 @@ Lanes run **in parallel in one working tree**, partitioned by exclusive file own
 - **Round 1: complete.** Lanes 0 and A–F landed; see [`RESULTS.md`](RESULTS.md).
 - **Round 2: complete.** Lanes G–J landed. 6 of 7 round-2 criteria met; items 4 and 15
   were blocked on D12.
-- **Round 3: open.** Lanes K–O, at the bottom of this file. Start there.
-- **Baseline:** **671 tests passing**, zero failures (verified 2026-09-08).
+- **Round 3: integration verified offline; live acceptance open.** K–N reported completion;
+  Lane O's live step awaits an owner-named day and a passing budget claim. See
+  [`RESULTS.md`](RESULTS.md#round-3-results--2026-09-09).
+- **Current suite:** **692 tests passing**, zero failures (verified 2026-09-09).
+  Round-3 entry baseline was 671; integration fixed the CLI tests' `.env` leakage.
 - **Last live run:** `daily-2026-09-07-f1b0d2e1` — 16 ideas, **0 tradeable**. It reported
   `succeeded` with zero diagnostics while having fetched nothing from three providers.
   **Do not treat that run as a product signal**; see D9. It has not been re-run under the
@@ -18,10 +21,11 @@ Lanes run **in parallel in one working tree**, partitioned by exclusive file own
   and none is scheduled.
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest        # expect 671 passed at baseline
+PYTHONPATH=src .venv/bin/python -m pytest        # current: 692 passed
 ```
 
-> **Reading order for an agent picking this up cold:** [`DECISIONS.md`](../docs/architecture/decisions/), then
+> **Reading order for an agent picking this up cold:** [`HANDOFF.md`](../HANDOFF.md), then
+> the [decision index](../docs/architecture/decisions/README.md), then
 > the round-3 section at the bottom of this file, then your own lane document, then
 > [`CROSS-LANE.md`](CROSS-LANE.md) for what other lanes have already settled. The round-1
 > and round-2 sections in between are **history** — accurate when written, superseded in
@@ -234,11 +238,14 @@ The release ships when all of the following hold on one live run:
 2. A live run completes `succeeded` with zero failures and zero diagnostics.
 3. The ideas table is ordered by grade descending inside each status bucket, and that
    ordering is pinned by a test with more than one row.
-4. The volatility baseline reads 20 of 20 stored sessions for every US name, and **no
-   fixture-mode row exists in `daily_snapshot`**.
+4. IV rank and both put/call percentiles publish at 10 prior stored observations per
+   reading, remain provisional below 20, and carry the sample count (items 16–17).
+   **No fixture-mode row exists in `daily_snapshot`.**
 5. `SPY` and `QQQ` appear in market context, not as trading ideas.
 6. Every grade in `dashboard.json` recomputes from fields present in the same document.
-7. The daily run has fired unattended, on schedule, on three consecutive weekdays.
+7. Three weekday daily runs are recorded, launched by hand. The owner declined `launchd`
+   to keep the shared allowance under manual control: this is an explicit scope decision,
+   not a tolerated scheduling gap.
 8. Every counted claim in `README.md` matches what the code actually does.
 
 Record the evidence for each in `tasks/RESULTS.md` (Lane F).
@@ -258,9 +265,9 @@ Record the evidence for each in `tasks/RESULTS.md` (Lane F).
     `api.quiverquant.com`.
 14. A backfilled value reproduces a stored live value **to full precision**, proved by a
     named test.
-15. After the backfill, a live run produces at least one setup that was previously rejected
-    for want of a volatility rank. This is the only criterion that proves the work delivered
-    anything.
+15. Superseded by item 21: after ten prior observations, a live run produces at least one
+    setup previously rejected for want of a volatility rank. No bulk backfill is scheduled
+    under D13; a populated column alone does not close this criterion.
 
 ---
 
@@ -421,7 +428,11 @@ Off limits to every lane, for the whole round:
 
 ## Definition of done — round 3
 
-Items 1 to 15 stand, with three restatements below. Round 3 adds items 16 to 21.
+Items 1 to 15 stand, with the restatements applied above and summarized below. Item 2's
+old zero-diagnostics wording must be read against items 9 and 10: an honestly diagnosed
+`partial` is expected for incomplete live data, while healthy runs must still succeed.
+D15 supersedes item 3's reader-facing ordering: the supported section sorts by conviction;
+the flat JSON audit list retains status buckets. Round 3 adds items 16 to 21.
 
 16. `iv_rank`, the put/call volume percentile and the put/call open-interest percentile all
     publish at **10** stored sessions and are withheld below it. All three boundaries — 9
@@ -443,8 +454,11 @@ Items 1 to 15 stand, with three restatements below. Round 3 adds items 16 to 21.
     every day of round 3.
 21. **The one criterion that proves round 3 delivered something visible.** Once 10 sessions
     are stored, a live run produces at least one setup that was previously rejected for
-    want of a volatility rank. Expected about 7 weekday runs after Lane K lands, so it
-    closes after the code does; record it as open with a date until it is met.
+    want of a volatility rank. Seven further usable weekday runs grow a three-observation
+    series to ten; the next run can publish, because today's snapshot is excluded from
+    its own history. Track stored observations per reading and completed weekday live
+    runs since K landed separately. Record a dated, conditional projection until both
+    the non-null rank and changed live setup output are observed.
 
 ### Restatements
 
@@ -461,3 +475,115 @@ Items 1 to 15 stand, with three restatements below. Round 3 adds items 16 to 21.
 Record the evidence for each in `tasks/RESULTS.md` (Lane O). **Evidence is a command
 and its output.** Round 1 recorded item 2 as passed on a status that could not fail; that is
 the standard this round is held against.
+
+---
+
+# Round 4 — opened 2026-09-09
+
+Round 3 and its two follow-ups are complete. **Baseline: 698 tests passing, zero failures**
+(verified independently at the 2026-09-09 ship audit, exact command, exit 0).
+
+Round 4 exists to implement one accepted decision:
+**[0017](../docs/architecture/decisions/0017-session-counting.md) — the volatility baseline
+must count distinct exchange sessions, not calendar snapshot dates.** The owner accepted it,
+and confirmed the attribution, on 2026-09-09.
+
+## Why it matters, in one paragraph
+
+The store holds three snapshot dates, and **no ticker has more than two exchange sessions**:
+4 September is captured twice for all eighteen tickers, and the two captures disagree — for
+AAPL by 146% on put/call open interest. `VOLATILITY-BASELINE.md` documented this limitation
+and no code enforced it. Today the question is inert, because `iv_rank` is NULL on every row
+and no percentile has ever been published. **It stops being inert at the first published
+rank**, projected for Monday 2026-09-21 — which is the real deadline, not the code freeze.
+
+## Round 4 lane map
+
+| Lane | Name | Decision | Live allowance | Depends on |
+|---|---|---|---|---|
+| **Gate** | Commit the round-4 baseline | — | 0 | — (**must finish first**) |
+| **P** | [Session identity](lanes/lane-p-session-identity.md) | 0017 (option B2) | 0 | gate |
+
+**One lane, deliberately.** The change spans `storage.py`, `scoring.py`, `pipeline.py` and
+`backfill.py`. Splitting it gives sequencing rather than parallelism — the column must exist
+before any caller writes it — and it would make two lanes agree a database column's semantics
+in writing. That negotiation worked for `RunHealth` in round 2 because a mismatch failed
+loudly against an `extra="forbid"` model. **A mismatch here fails silently, as a wrong
+percentile**, which is precisely what 0017 exists to prevent.
+
+### The gate
+
+**Still not satisfied, and it has now been open across three rounds of work.** At the
+2026-09-09 audit the tree carried **35 uncommitted files** spanning round 3, both follow-ups
+and the audit's own repairs, on top of HEAD `545e9e3`. Commit that as the round-4 baseline,
+run the suite, and record the commit hash and test count in
+[`CROSS-LANE.md`](CROSS-LANE.md) before Lane P writes anything. Without it, "did this lane
+change that?" is unanswerable.
+
+## File ownership — round 4
+
+Round 3 is finished, so its files are released. Lane P's set is in its lane document and is
+reproduced here.
+
+### Lane P — Session identity
+```
+src/briefing_app/storage.py
+src/briefing_app/scoring.py
+src/briefing_app/pipeline.py
+src/briefing_app/backfill.py
+src/briefing_app/providers/normalizers.py
+migrations/004_session_identity.sql          (new)
+ops/repair_snapshot_sessions.py              (new)
+tests/test_storage_repository.py
+tests/test_scoring.py
+tests/test_pipeline.py
+tests/test_backfill.py
+docs/architecture/VOLATILITY-BASELINE.md
+```
+
+### Files nobody owns in round 4
+
+| File | Why |
+|---|---|
+| `src/briefing_app/dashboard/**` | Round 3 shipped it. `grading.py` in particular stays **locked** — no grade may change, as since round 3. |
+| `docs/architecture/decisions/**` | 0017 is Accepted. Implement it; do not re-open it. |
+| `tasks/CROSS-LANE.md` | Append-only. Never edit another entry. |
+| `docs/archive/**`, `tasks/archive/**` | History. |
+
+## Definition of done — round 4
+
+Items 1–21 stand. Round 4 adds 22–27.
+
+22. Every newly written `daily_snapshot` row carries the **chain's own session**, derived
+    from `data.last_trade_time` — not the run date, not the capture timestamp. Pinned by a
+    test in which a run dated 2026-09-07 stores session **2026-09-04**.
+23. `option_metric_history` returns **at most one observation per (ticker, exchange
+    session)**. When two exist the **later capture wins**, and the run **records that a
+    duplicate occurred and which capture won**. Both halves pinned.
+24. A duplicate session alone does **not** mark a run `partial` — it is classified `normal`,
+    for the same reason a warm-up is (item 10).
+25. The three stored rows are repaired offline from the raw payloads already on disk, **with
+    nothing deleted**, and the per-ticker counts afterwards are exactly: `iv_atm` **2** for
+    15 of 18 tickers, **1** JPM, **1** LMT, **0** FDX; `pc_ratio_vol` and `pc_ratio_oi` **2**
+    for all 18.
+26. A **stale chain on an ordinary trading day** is handled identically to a weekend
+    duplicate, pinned by a test built from the real FDX and LMT 2026-09-03 case. A rule that
+    only catches weekends and holidays does not satisfy this item.
+27. The published *"N stored sessions"* label counts **distinct sessions**, so the label is
+    true. No published behaviour depends on the raw file tree at query time — option B1 was
+    rejected because raw payloads are overwritten.
+
+Record the evidence in [`RESULTS.md`](RESULTS.md). **Evidence is a command and its output.**
+
+## What round 4 does not close
+
+- **Item 21** still needs the cadence: weekday runs until a rank publishes, projected Monday
+  2026-09-21 under 0017.
+- **Item 2** still needs one live run under the corrected status. The most recent published
+  artifact, `daily-2026-09-09-aabf226e`, is a **fixture** run — correctly and visibly
+  labelled, but not live evidence.
+- **Why the repeated captures disagree is undiagnosed.** "Later wins" is a tie-break, not a
+  correctness argument, and Lane P is required to say so rather than imply otherwise.
+- **The weekday-only cadence cannot be enforced by code.** `is_market_day` has no holiday
+  list, and `MARKET_HOLIDAYS` is declared in `.env` but referenced nowhere in `src/`. That is
+  separate, small, unscheduled work — not Lane P's.
