@@ -50,9 +50,10 @@ today.* Both halves have to hold, and both are asserted by tests:
 
 **Warm-up is normal.** The IV and put/call baselines are built from this application's own
 persisted snapshots. They start empty and fill one session per run, so
-`iv rank baseline still building: 3 of 20 sessions stored` is true every single day for
-roughly four weeks and says nothing about today. Escalating it would make `partial` the
-constant on day one.
+`iv rank baseline below publish floor: 3 of 10 sessions stored` is true every single day
+until the ten-session publish floor and says nothing about today's source health. A
+10–19-session reading is published as provisional and is normal too. Escalating either
+condition would make `partial` the constant on day one.
 
 **An entitlement fact is normal.** `no_credentials`, `plan_gated` and `paywalled` are
 decided by what the owner has configured and paid for. They are identical every run,
@@ -110,42 +111,43 @@ exactly, so a new `issues.append` fails the suite until it is classified here.
 
 | Line | Issue | Severity | Why |
 |---|---|---|---|
-| 1885 | FMP historical price EOD normalization failed | degraded | Prices answered and were unreadable; every downstream number is worse. |
-| 1907 | Twelve Data time series normalization failed | degraded | As above, on the price fallback. |
-| 1936 | Alpha Vantage daily / daily-adjusted normalization failed | degraded | As above, on the last price source. |
-| 1941 | unwired provider for `prices` | normal | Configuration statement; chain moves on. |
-| 1973 | unwired provider for `macro calendar` | normal | Configuration statement; chain moves on. |
-| 1994 | FMP economic calendar normalization failed | degraded | `S_M` loses its dated calendar. |
-| 2072 | FRED release upcoming-dates normalization failed | degraded | The forward macro window is short. |
-| 2129 | unwired provider for `macro readings` | normal | Configuration statement; chain moves on. |
-| 2149 | FMP economic indicator normalization failed | degraded | One macro factor drops out of `S_M`. |
-| 2176 | FMP treasury rates normalization failed | degraded | `treasury_10y` and `yield_curve` drop out. |
-| 2227 | Alpha Vantage earnings normalization failed | degraded | The catalyst date is unconfirmed (D4 territory). |
-| 2253 | FMP earnings normalization failed | degraded | As above, on the lead earnings source. |
-| 2255 | unwired provider for `earnings` | normal | Configuration statement; chain moves on. |
-| 2287 | Alpha Vantage news normalization failed | degraded | `S_S` loses a news batch. |
-| 2303 | FMP stock news normalization failed | degraded | `S_S` loses a news batch. |
-| 2315 | Finnhub company news unavailable (*status*) | **by status** | See the status table below. |
-| 2318 | unwired provider for `news` | normal | Configuration statement; chain moves on. |
-| 2370 | unwired provider for `political` | normal | Configuration statement; chain moves on. |
-| 2400 | FMP senate/house latest normalization failed | degraded | `political_flow` loses a chamber. |
-| 2426 | unwired provider for `retail` | normal | Configuration statement; chain moves on. |
-| 2458 | ApeWisdom retail momentum page normalization failed | degraded | Attention feed truncated mid-read. |
-| 2500 | unwired provider for `analyst` | normal | Configuration statement; chain moves on. |
-| 2539 | FMP/Finnhub analyst normalization failed | degraded | `S_S` loses its analyst leg. |
-| 2589 | FRED series reported no release id | degraded | The calendar join key is absent; ageing cannot be computed. |
-| 2645 | FRED release dates normalization failed | degraded | As 2072, on the historical side. |
-| 2716 | FRED series observations normalization failed | degraded | One macro factor drops out of `S_M`. |
-| 2743 | no database configured, so no self-built baselines | degraded | Not a warm-up: the baselines can never build. |
-| 2768 | *baseline still building: N of 20 sessions stored* | **normal** | The warm-up working as designed (D9, explicit). |
-| 2798 | unwired provider for `short_interest` | normal | Configuration statement; chain moves on. |
-| 2838 | FINRA short volume normalization failed | degraded | `short_borrow` loses its only free source. |
-| 2870 | SEC EDGAR Form 4 index unavailable (*status*) | **by status** | See the status table below. |
-| 2905 | SEC Form 4 document normalization failed | degraded | `S_I` loses one filing. |
-| 2954 | unwired provider for `insider` | normal | Configuration statement; chain moves on. |
-| 2962 | Alpha Vantage / FMP insider normalization failed | degraded | `S_I` loses a source. |
-| 2977 | *any* `_optional_response` fetch unavailable (*status*) | **by status** | The shared recording point; see below. |
-| 3559 | cached FMP political payload ignored | degraded | Prior-day cache unreadable; the flow window is short. |
+| 1919 | FMP historical price EOD normalization failed | degraded | Prices answered and were unreadable; every downstream number is worse. |
+| 1941 | Twelve Data time series normalization failed | degraded | As above, on the price fallback. |
+| 1970 | Alpha Vantage daily / daily-adjusted normalization failed | degraded | As above, on the last price source. |
+| 1975 | unwired provider for `prices` | normal | Configuration statement; chain moves on. |
+| 2007 | unwired provider for `macro calendar` | normal | Configuration statement; chain moves on. |
+| 2028 | FMP economic calendar normalization failed | degraded | `S_M` loses its dated calendar. |
+| 2106 | FRED release upcoming-dates normalization failed | degraded | The forward macro window is short. |
+| 2163 | unwired provider for `macro readings` | normal | Configuration statement; chain moves on. |
+| 2183 | FMP economic indicator normalization failed | degraded | One macro factor drops out of `S_M`. |
+| 2210 | FMP treasury rates normalization failed | degraded | `treasury_10y` and `yield_curve` drop out. |
+| 2261 | Alpha Vantage earnings normalization failed | degraded | The catalyst date is unconfirmed (D4 territory). |
+| 2287 | FMP earnings normalization failed | degraded | As above, on the lead earnings source. |
+| 2289 | unwired provider for `earnings` | normal | Configuration statement; chain moves on. |
+| 2321 | Alpha Vantage news normalization failed | degraded | `S_S` loses a news batch. |
+| 2337 | FMP stock news normalization failed | degraded | `S_S` loses a news batch. |
+| 2349 | Finnhub company news unavailable (*status*) | **by status** | See the status table below. |
+| 2352 | unwired provider for `news` | normal | Configuration statement; chain moves on. |
+| 2404 | unwired provider for `political` | normal | Configuration statement; chain moves on. |
+| 2434 | FMP senate/house latest normalization failed | degraded | `political_flow` loses a chamber. |
+| 2460 | unwired provider for `retail` | normal | Configuration statement; chain moves on. |
+| 2492 | ApeWisdom retail momentum page normalization failed | degraded | Attention feed truncated mid-read. |
+| 2534 | unwired provider for `analyst` | normal | Configuration statement; chain moves on. |
+| 2573 | FMP/Finnhub analyst normalization failed | degraded | `S_S` loses its analyst leg. |
+| 2623 | FRED series reported no release id | degraded | The calendar join key is absent; ageing cannot be computed. |
+| 2679 | FRED release dates normalization failed | degraded | As 2088, on the historical side. |
+| 2750 | FRED series observations normalization failed | degraded | One macro factor drops out of `S_M`. |
+| 2784 | no database configured, so no self-built baselines | degraded | Not a warm-up: the baselines can never build. |
+| 2802 | *duplicate exchange session YYYY-MM-DD: kept the … capture, superseded the … capture* | **normal** | 0017. A weekend or holiday run, and a stale per-ticker chain on an ordinary trading day, re-read a session already stored. Expected, so escalating it would make `partial` constant — the same reason the warm-up below is normal. Still named on every run it happens. |
+| 2833 | *baseline below publish floor: N of 10 sessions stored* | **normal** | The warm-up working as designed (D9, explicit). |
+| 2868 | unwired provider for `short_interest` | normal | Configuration statement; chain moves on. |
+| 2908 | FINRA short volume normalization failed | degraded | `short_borrow` loses its only free source. |
+| 2940 | SEC EDGAR Form 4 index unavailable (*status*) | **by status** | See the status table below. |
+| 2975 | SEC Form 4 document normalization failed | degraded | `S_I` loses one filing. |
+| 3024 | unwired provider for `insider` | normal | Configuration statement; chain moves on. |
+| 3032 | Alpha Vantage / FMP insider normalization failed | degraded | `S_I` loses a source. |
+| 3047 | *any* `_optional_response` fetch unavailable (*status*) | **by status** | The shared recording point; see below. |
+| 3629 | cached FMP political payload ignored | degraded | Prior-day cache unreadable; the flow window is short. |
 
 ### The three "by status" points, resolved
 

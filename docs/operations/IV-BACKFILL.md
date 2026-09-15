@@ -1,47 +1,51 @@
 # IV Backfill
 
+## Current position — retained, correct, and not scheduled
+
+**D13 declined a bulk Alpha Vantage backfill.** The baseline is being filled by ordinary
+CBOE-backed live runs and will publish at a threshold of 10 stored sessions; readings below
+20 sessions are provisional. See [the volatility baseline](../architecture/VOLATILITY-BASELINE.md).
+
+The backfill tool remains retained because its computation and safety stops are useful, but
+it is **not scheduled to run**. Alpha Vantage `HISTORICAL_OPTIONS` is paid-only, and a
+backfill would splice its session-close chain into the CBOE intraday series unless a measured
+vendor gap supports that choice. The put/call measurement is recorded in
+[vendor consistency](../research/alternatives/vendor-consistency.md); the implied-volatility
+measurement remains unexecuted because the owner declined to pay for the endpoint. Until a
+decision based on that measurement exists, `--allow-vendor-splice` is an escape hatch, not a
+normal workflow option.
+
+The put/call evidence is narrower than the original vendor-gap summary: the same-day
+comparison is **AAPL on September 3 only** (8.93% volume, 3.92% open interest). The
+September 6 and 7 CBOE captures both describe the September 4 exchange session; their
+55.38% / 146.34% discrepancy is **intra-CBOE capture variation**, not an isolated vendor
+definitional gap. D14's refusal is unchanged: within-vendor instability must be understood
+before adding another vendor. The measurement tool now retains future fetched MarketData
+payloads by default and offers `--cboe-only` for zero-request capture/session inspection;
+the original missing MarketData payloads are still needed to replay the historical table.
+See the linked measurement record for exact paths and commands. Baseline session counting
+belongs to [Prompt B](../../tasks/FOLLOWUP-PROMPTS.md#prompt-b--the-session-counting-decision-brief),
+not this correction or a backfill run.
+
 The self-built volatility baselines use `daily_snapshot.iv_atm`, `pc_ratio_vol`, and
-`pc_ratio_oi`. Live runs need 20 stored sessions before IV rank and put/call percentiles
-open. The backfill command replays Alpha Vantage historical option chains into the same
-storage shape so the baseline can warm up without waiting four trading weeks.
+`pc_ratio_oi`. The backfill command can replay Alpha Vantage historical option chains into the
+same storage shape, but it must not be used to accelerate the current baseline.
 
-## Run It
+## Safe inspection
 
-Dry-run the plan first:
+The command may be inspected without a provider request or a database write:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m briefing_app.cli backfill-iv --dry-run
 ```
 
-Backfill the gate-accepted US names for the run date:
+It reports the vendor guard and reservation without sending anything. A writing run remains
+blocked when its vendor differs from `config.providers.options[0]`; the refusal points to the
+vendor-consistency record above. The command is resumable if a future decision authorizes it:
+it skips any `(ticker, date)` pair whose option metrics are already stored and stops cleanly
+on the first `synthetic` response or after three consecutive failures.
 
-```bash
-PYTHONPATH=src .venv/bin/python -m briefing_app.cli backfill-iv
-```
-
-Limit scope while testing:
-
-```bash
-PYTHONPATH=src .venv/bin/python -m briefing_app.cli backfill-iv \
-  --ticker NVDA --ticker MSFT --sessions 5
-```
-
-The command is resumable. It skips any `(ticker, date)` pair whose option metrics are
-already stored, reports remaining pairs, and exits cleanly when the provider budget is
-spent.
-
-Two guards stand between a dry run and a writing one, and both refuse rather than warn:
-
-```bash
---allow-vendor-splice     # the chains come from a different vendor than the live path's
---live-run-reserve N      # requests to hold back for the daily run (default: all of them)
-```
-
-`--dry-run` reports both without sending anything. A run that cannot proceed exits with
-status `blocked` and names the reason. See **Budget Reservation** and **Comparability**
-below for what each is protecting.
-
-## Request Cost
+## Historical request cost
 
 The plan as the tool reports it, `backfill-iv --dry-run` on 2026-09-08:
 
@@ -54,14 +58,14 @@ budget_remaining_today:        25
 spendable:                      0     (reserved for the daily run - see below)
 ```
 
-That 12-day figure is arithmetic, not a forecast, and **on the current free key it is
+That 12-day figure is historical arithmetic, not a plan. **On the current free key it is
 academic**: `HISTORICAL_OPTIONS` is not on the Alpha Vantage free tier. It answers HTTP
 200 with a plausible sample payload, which validation reports as `synthetic`
 (`docs/research/SOURCE_STATUS.md` — "Alpha Vantage premium endpoints answer HTTP 200 with an
 artificial sample schema"). Waiting out the allowance therefore does not eventually
 produce the backfill; it produces 25 refusals a day, indefinitely. **D12 is not a choice
-between paying and waiting — waiting yields nothing.** It is: pay for the endpoint, find
-another source, or drop the backfill.
+between paying and waiting — waiting yields nothing.** D13 closed the choice for this
+baseline: do not pay and do not backfill in bulk.
 
 Sample data cannot reach the store: `fetch_function` validates before it returns and
 raises on `synthetic`, so nothing is written. The requests are still spent, which is why
@@ -82,6 +86,7 @@ provider is a worse outcome than a baseline that warms up slowly.
 | Plan has no daily ceiling (`ALPHA_VANTAGE_PLAN=paid`) | nothing | everything |
 | `--cache-only` replay | nothing | it sends no requests at all |
 | Today's live run has **not** finished | the full allowance, 25 | nothing |
+| Today's live run finished but has **no dated counter** | the full allowance, 25 | nothing |
 | Today's live run **has** finished | 6 | whatever remains, less 6 |
 
 Both numbers are measured, not chosen for roundness. The live run's own counters in
@@ -105,6 +110,10 @@ reaches its providers.
 
 "Has finished" means a `briefing_run` row for the run date whose `run_type` is not
 `iv_backfill`, whose status is `succeeded` or `partial`, and which has a `finished_at`.
+It releases the smaller six-request floor only when
+`data/provider_budget/alpha_vantage/<run-date>.json` also exists. A finished run without that
+counter may be the provider-less-run shape, not proof that all 25 requests are spare, so the
+full reserve remains in force even if `--live-run-reserve` names a smaller number.
 
 Override with `--live-run-reserve N`, or with `BACKFILL_LIVE_RUN_RESERVE` and
 `BACKFILL_COMPLETED_RUN_RESERVE`. The reservation is reported in every result and every
@@ -187,14 +196,17 @@ intraday chain and whose new points are another's close is not one series, and D
 warning is that this failure is invisible in the output.
 
 So the backfill now **refuses to write** when its provider differs from
-`config.providers.options[0]`, and says why. `--allow-vendor-splice` overrides it, for
-whoever has accepted the consequence. Every backfilled row also carries its own
+`config.providers.options[0]`, and says why. `--allow-vendor-splice` is deliberately not a
+normal workflow option; it can override the guard only after the owner has recorded a decision
+against the measurement in [vendor consistency](../research/alternatives/vendor-consistency.md).
+Every backfilled row also carries its own
 provenance — `raw.backfill.chain_source`, `chain_venue`, `chain_as_of`,
 `live_options_provider` — so a mixed series can be separated after the fact. A live row
 records its chain source only in `evidence_ledger`.
 
-This is an input to D12, not a conclusion about it: the cheapest resolution may be a
-historical **CBOE** chain rather than a different vendor at any price.
+This is the constraint D14 keeps in force. Any future reconsideration must start with the
+measured record in [vendor consistency](../research/alternatives/vendor-consistency.md), not
+with a new backfill run. A historical **CBOE** chain would avoid the splice entirely.
 
 ## Fixture Contamination Purge
 
@@ -232,26 +244,9 @@ The code now refuses any `daily_snapshot` write whose parent `briefing_run.detai
 is not `live`. Fixture attempts are reported as diagnostics instead of silently entering
 the history store.
 
-## Execution — J3, not yet run
+## Execution status
 
-> **Placeholder. Nothing below is measured yet.** D12 is open: the owner has not chosen
-> between paying for Alpha Vantage premium, a free alternative from Lane I's research, or
-> a reduced ticker set. No real backfill request has ever been sent, and
-> `select count(*) from daily_snapshot where iv_rank is not null` still returns 0.
-
-Fill in once J3 runs:
-
-- **D12 outcome, and the source actually used** —
-- **Was the vendor splice accepted, or avoided by choosing a CBOE-consistent source?** —
-- **Real cost in requests** — against the 293 remaining pairs estimated
-- **Real elapsed time** — against the 12-day estimate
-- **Did a name reach 20 stored sessions and open its baseline?** —
-- **Did a live run afterwards produce a setup previously rejected `iv_rank_unavailable`?**
-  — the only line that proves the work delivered anything.
-
-Before any writing run:
-
-```bash
-cp data/briefing.sqlite3 "data/briefing.sqlite3.backup-$(date +%Y%m%d-%H%M%S)"
-PYTHONPATH=src .venv/bin/python -m briefing_app.cli backfill-iv --dry-run
-```
+**No backfill is scheduled or authorized.** The correct visible outcome is a same-vendor CBOE
+baseline accumulating through daily runs, not a bulk write. If the owner later authorizes a
+different plan, take a database backup, run the dry run above, and record the paid-key
+entitlement and the D14 vendor decision before any writing request.

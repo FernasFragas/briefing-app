@@ -30,6 +30,7 @@ decisions as `D13`, and renumbering would break every one of those citations for
 | [0014](0014-vendor-consistency-measure-before-splice.md) | Vendor consistency: measure the gap before any splice | 3 | Accepted |
 | [0015](0015-report-split-supported-and-contradicted.md) | Report split: supported and contradicted theses | 3 | Accepted |
 | [0016](0016-live-run-budget-ledger.md) | Live runs: agents spend inside an enforced budget | 3 | Accepted |
+| [0017](0017-session-counting.md) | How the volatility baseline counts sessions | 3 follow-up | Accepted |
 
 ## The three rounds
 
@@ -44,6 +45,9 @@ was in place. That sequence is the most useful thing this index records.
 - **Round 3 (0013–0016), 2026-09-08.** Taken against the measured state of the local store.
   Closes the funding question without paying, splits the report, and puts live spending
   under a ledger.
+- **Round 3 follow-up (0017), 2026-09-09.** Opened by the ship audit, which found that the
+  baseline counts calendar snapshot dates rather than distinct exchange sessions — a
+  limitation `VOLATILITY-BASELINE.md` documented and no code enforced.
 
 ## Earlier decisions — the Q series
 
